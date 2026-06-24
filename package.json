@@ -8,7 +8,7 @@
     "dev": "node --watch server.mjs"
   },
   "dependencies": {
-    "@fastify/reply-from": "12.6.2",
+    "@fastify/reply-from": "11.0.2",
     "@fastify/static": "7.0.4",
     "@fastify/swagger": "8.15.0",
     "@fastify/swagger-ui": "4.1.0",
