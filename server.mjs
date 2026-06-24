@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import { execFile } from 'node:child_process';
 import { writeFile, mkdir, readFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 
@@ -56,9 +56,10 @@ await app.register(import('@fastify/static'), {
 // Evita dependência de CDN externo — funciona offline e na rede Tailscale
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const playerPkg = require.resolve('@hyperframes/player/dist/hyperframes-player.global.js');
-import { dirname } from 'node:path';
-const playerDir = dirname(playerPkg);
+// Resolve pelo export raiz (".") e sobe dois níveis (dist/hyperframes-player.js → dist → pkg root),
+// depois desce para /dist — evita violar o exports map que não expõe subpaths de /dist.
+const playerRootFile = require.resolve('@hyperframes/player');
+const playerDir = join(dirname(dirname(playerRootFile)), 'dist');
 
 await app.register(import('@fastify/static'), {
   root: playerDir,
