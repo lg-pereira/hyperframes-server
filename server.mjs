@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import { execFile } from 'node:child_process';
-import { writeFile, mkdir, readFile, rm } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 
@@ -12,6 +12,65 @@ const PREVIEW_DIR = '/tmp/hf-previews';
 
 // TTL dos previews em ms (padrão: 2 horas)
 const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
+
+// Pool de portas internas para os processos hyperframes preview
+const PREVIEW_PORT_MIN = parseInt(process.env.PREVIEW_PORT_MIN ?? '3100');
+const PREVIEW_PORT_MAX = parseInt(process.env.PREVIEW_PORT_MAX ?? '3199');
+const availablePorts = new Set(
+  Array.from({ length: PREVIEW_PORT_MAX - PREVIEW_PORT_MIN + 1 }, (_, i) => PREVIEW_PORT_MIN + i)
+);
+
+// Processos ativos: previewId → { proc, port, timer }
+const activePreviews = new Map();
+
+function acquirePort() {
+  for (const p of availablePorts) { availablePorts.delete(p); return p; }
+  throw new Error('Sem portas disponíveis — limite de previews simultâneos atingido');
+}
+
+function releasePreview(previewId) {
+  const entry = activePreviews.get(previewId);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  try { entry.proc.kill('SIGTERM'); } catch {}
+  availablePorts.add(entry.port);
+  activePreviews.delete(previewId);
+  rm(join(PREVIEW_DIR, previewId), { recursive: true, force: true }).catch(() => {});
+}
+
+// Spawna hyperframes preview e aguarda o studio ficar pronto (stdout "running at")
+function spawnPreview(dir, port) {
+  return new Promise((resolve, reject) => {
+    const proc = execFile(
+      'npx',
+      ['hyperframes', 'preview', dir, '--port', String(port), '--no-open'],
+      { timeout: 0 }
+    );
+
+    const readyTimeout = setTimeout(
+      () => { proc.kill(); reject(new Error('hyperframes preview não iniciou em 30s')); },
+      30_000
+    );
+
+    const onChunk = (chunk) => {
+      const text = chunk.toString();
+      if (text.includes('running at') || text.includes(`localhost:${port}`)) {
+        clearTimeout(readyTimeout);
+        resolve(proc);
+      }
+    };
+
+    proc.stdout?.on('data', onChunk);
+    proc.stderr?.on('data', onChunk);
+    proc.on('error', (err) => { clearTimeout(readyTimeout); reject(err); });
+    proc.on('exit', (code) => {
+      if (code != null && code !== 0) {
+        clearTimeout(readyTimeout);
+        reject(new Error(`hyperframes preview saiu com código ${code}`));
+      }
+    });
+  });
+}
 
 await mkdir(WORK_DIR, { recursive: true });
 await mkdir(PREVIEW_DIR, { recursive: true });
@@ -45,27 +104,8 @@ await app.register(import('@fastify/swagger-ui'), {
   },
 });
 
-// ─── Serve arquivos estáticos dos previews ────────────────────────────────────
-await app.register(import('@fastify/static'), {
-  root: PREVIEW_DIR,
-  prefix: '/preview/assets/',
-  decorateReply: false,
-});
-
-// ─── Serve o @hyperframes/player diretamente do node_modules ─────────────────
-// Evita dependência de CDN externo — funciona offline e na rede Tailscale
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-// Resolve pelo export raiz (".") e sobe dois níveis (dist/hyperframes-player.js → dist → pkg root),
-// depois desce para /dist — evita violar o exports map que não expõe subpaths de /dist.
-const playerRootFile = require.resolve('@hyperframes/player');
-const playerDir = join(dirname(dirname(playerRootFile)), 'dist');
-
-await app.register(import('@fastify/static'), {
-  root: playerDir,
-  prefix: '/player/',
-  decorateReply: false,
-});
+// ─── Proxy reverso para os studios hyperframes preview ───────────────────────
+await app.register(import('@fastify/reply-from'));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get(
@@ -88,16 +128,14 @@ app.get(
 );
 
 // ─── POST /preview ────────────────────────────────────────────────────────────
-// Salva a composição e devolve uma URL para visualizar no browser com o
-// <hyperframes-player>. Sem renderização — instantâneo.
 app.post(
   '/preview',
   {
     schema: {
       summary: 'Cria um preview ao vivo da composição',
       description:
-        'Salva o HTML e assets, retorna uma URL para abrir no browser. ' +
-        'O preview usa o <hyperframes-player> e expira em 2 horas.',
+        'Salva o HTML e assets no disco, spawna `hyperframes preview` e retorna ' +
+        'a URL proxiada pelo servidor. O processo expira em 2 horas.',
       body: {
         type: 'object',
         required: ['html'],
@@ -118,16 +156,6 @@ app.post(
               },
             },
           },
-          title: {
-            type: 'string',
-            description: 'Título exibido na página de preview',
-            default: 'Preview',
-          },
-          aspect_ratio: {
-            type: 'string',
-            description: 'Aspect ratio do player, ex: "16/9", "9/16", "1/1"',
-            default: '16/9',
-          },
         },
       },
       response: {
@@ -143,75 +171,63 @@ app.post(
     },
   },
   async (req, reply) => {
-    const { html, assets = [], title = 'Preview', aspect_ratio = '16/9' } = req.body;
+    const { html, assets = [] } = req.body;
 
     const previewId = randomUUID();
     const previewDir = join(PREVIEW_DIR, previewId);
     await mkdir(previewDir, { recursive: true });
 
-    // Salva a composição original
-    await writeFile(join(previewDir, 'composition.html'), html, 'utf8');
-
-    // Salva os assets
+    await writeFile(join(previewDir, 'index.html'), html, 'utf8');
     for (const asset of assets) {
-      const buf = Buffer.from(asset.base64, 'base64');
-      await writeFile(join(previewDir, asset.filename), buf);
+      await writeFile(join(previewDir, asset.filename), Buffer.from(asset.base64, 'base64'));
     }
 
-    // Monta a página de preview com o <hyperframes-player>
-    // Os assets são servidos via /preview/assets/<previewId>/<filename>
-    const assetPaths = assets.map((a) => a.filename);
-    const compositionWithAssets = rewriteAssetPaths(html, previewId, assetPaths);
-    await writeFile(join(previewDir, 'composition-served.html'), compositionWithAssets, 'utf8');
+    const port = acquirePort();
 
-    const playerHtml = buildPlayerPage(previewId, title, aspect_ratio);
-    await writeFile(join(previewDir, 'index.html'), playerHtml, 'utf8');
+    let proc;
+    try {
+      proc = await spawnPreview(previewDir, port);
+    } catch (err) {
+      releasePreview(previewId);
+      availablePorts.add(port);
+      return reply.code(500).send({ error: err.message });
+    }
 
-    // Salva metadados para limpeza posterior
-    await writeFile(
-      join(previewDir, 'meta.json'),
-      JSON.stringify({ createdAt: Date.now(), title, aspect_ratio }),
-      'utf8'
-    );
+    const timer = setTimeout(() => releasePreview(previewId), PREVIEW_TTL_MS);
+    activePreviews.set(previewId, { proc, port, timer });
 
-    // Agenda limpeza automática após TTL
-    setTimeout(
-      () => rm(previewDir, { recursive: true, force: true }),
-      PREVIEW_TTL_MS
-    );
-
-    app.log.info({ previewId }, 'Preview created');
+    app.log.info({ previewId, port }, 'Preview started');
 
     reply.code(201).send({
       preview_id: previewId,
-      preview_url: `/preview/${previewId}`,
+      preview_url: `/preview/${previewId}/`,
       expires_in: '2 horas',
     });
   }
 );
 
-// ─── GET /preview/:previewId ──────────────────────────────────────────────────
+// ─── GET /preview/:previewId/* — proxy para o studio interno ─────────────────
 app.get(
-  '/preview/:previewId',
+  '/preview/:previewId/*',
   {
     schema: {
-      summary: 'Abre a página de preview no browser',
+      summary: 'Acessa o studio de preview proxiado',
       params: {
         type: 'object',
-        properties: { previewId: { type: 'string' } },
+        properties: {
+          previewId: { type: 'string' },
+          '*': { type: 'string' },
+        },
       },
     },
   },
   async (req, reply) => {
     const { previewId } = req.params;
-    const indexPath = join(PREVIEW_DIR, previewId, 'index.html');
-
-    if (!existsSync(indexPath)) {
-      return reply.code(404).send({ error: 'Preview não encontrado ou expirado' });
-    }
-
-    const html = await readFile(indexPath, 'utf8');
-    reply.header('Content-Type', 'text/html; charset=utf-8').send(html);
+    const entry = activePreviews.get(previewId);
+    if (!entry) return reply.code(404).send({ error: 'Preview não encontrado ou expirado' });
+    const subPath = req.params['*'] ?? '';
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    return reply.from(`http://localhost:${entry.port}/${subPath}${qs}`);
   }
 );
 
@@ -220,139 +236,26 @@ app.delete(
   '/preview/:previewId',
   {
     schema: {
-      summary: 'Remove um preview manualmente',
+      summary: 'Encerra um preview e libera a porta',
       params: {
         type: 'object',
         properties: { previewId: { type: 'string' } },
       },
       response: {
-        200: {
-          type: 'object',
-          properties: { deleted: { type: 'boolean' } },
-        },
+        200: { type: 'object', properties: { deleted: { type: 'boolean' } } },
       },
     },
   },
   async (req, reply) => {
     const { previewId } = req.params;
-    const previewDir = join(PREVIEW_DIR, previewId);
-
-    if (!existsSync(previewDir)) {
+    if (!activePreviews.has(previewId)) {
       return reply.code(404).send({ error: 'Preview não encontrado' });
     }
-
-    await rm(previewDir, { recursive: true, force: true });
+    releasePreview(previewId);
     app.log.info({ previewId }, 'Preview deleted');
     return { deleted: true };
   }
 );
-
-// ─── Helpers de preview ───────────────────────────────────────────────────────
-
-/**
- * Reescreve os caminhos de assets dentro do HTML para apontar para
- * /preview/assets/<previewId>/<filename>, que é servido pelo @fastify/static.
- */
-function rewriteAssetPaths(html, previewId, assetFilenames) {
-  let result = html;
-  for (const filename of assetFilenames) {
-    // Substitui referências simples ao filename por URL absoluta do servidor
-    const escaped = filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    result = result.replace(
-      new RegExp(`(src|href)=["']${escaped}["']`, 'g'),
-      `$1="/preview/assets/${previewId}/${filename}"`
-    );
-  }
-  return result;
-}
-
-/**
- * Gera a página HTML que embute a composição diretamente num iframe sem sandbox.
- * Mais simples e confiável que o <hyperframes-player> para preview interno.
- */
-function buildPlayerPage(previewId, title, aspectRatio = '16/9') {
-  return `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${escapeHtml(title)} — Preview</title>
-  <!-- Player servido localmente do node_modules — sem dependência de CDN -->
-  <script src="/player/hyperframes-player.global.js"></script>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: #0a0a0a;
-      color: #f0f0f0;
-      font-family: system-ui, sans-serif;
-      min-height: 100dvh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 1.5rem;
-      padding: 1.5rem;
-    }
-    header {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    header h1 {
-      font-size: 1.1rem;
-      font-weight: 600;
-      opacity: 0.9;
-    }
-    header p {
-      font-size: 0.75rem;
-      opacity: 0.4;
-    }
-    .player-wrapper {
-      width: 100%;
-      max-width: 900px;
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 24px 64px rgba(0,0,0,0.6);
-    }
-    hyperframes-player {
-      width: 100%;
-      aspect-ratio: ${aspectRatio};
-      display: block;
-    }
-    footer {
-      font-size: 0.7rem;
-      opacity: 0.3;
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>${escapeHtml(title)}</h1>
-    <p>Preview — HyperFrames Server</p>
-  </header>
-
-  <div class="player-wrapper">
-    <hyperframes-player
-      src="/preview/assets/${previewId}/composition-served.html"
-      controls
-      autoplay
-    ></hyperframes-player>
-  </div>
-
-  <footer>Este preview expira em 2 horas · ID: ${previewId}</footer>
-</body>
-</html>`;
-}
-
-
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
 
 // ─── POST /lint ───────────────────────────────────────────────────────────────
 // Valida o HTML da composição sem renderizar. Síncrono e instantâneo.
