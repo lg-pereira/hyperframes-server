@@ -40,6 +40,9 @@ await app.register(import('@fastify/swagger'), {
 await app.register(import('@fastify/swagger-ui'), {
   routePrefix: '/docs',
   uiConfig: { docExpansion: 'full' },
+  theme: {
+    css: [{ filename: 'theme.css', content: '.topbar { display: none }' }],
+  },
 });
 
 // ─── Serve arquivos estáticos dos previews ────────────────────────────────────
