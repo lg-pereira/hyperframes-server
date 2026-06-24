@@ -385,7 +385,7 @@ app.post(
       const result = await new Promise((resolve) => {
         execFile(
           'npx',
-          ['hyperframes', 'lint', '--input', lintFile, '--json'],
+          ['hyperframes', 'lint', '--json'],
           { cwd: lintDir, timeout: 15_000 },
           (err, stdout, stderr) => {
             resolve({ err, stdout, stderr });
