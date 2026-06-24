@@ -60,8 +60,8 @@ COPY server.mjs .
 
 # ── Usuário sem privilégios para rodar o Chromium com segurança ───────────────
 RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
-    && mkdir -p /home/pptruser/Downloads /tmp/hf-jobs \
-    && chown -R pptruser:pptruser /home/pptruser /tmp/hf-jobs /app
+    && mkdir -p /home/pptruser/Downloads /tmp/hf-jobs /tmp/hf-previews \
+    && chown -R pptruser:pptruser /home/pptruser /tmp/hf-jobs /tmp/hf-previews /app
 
 USER pptruser
 
