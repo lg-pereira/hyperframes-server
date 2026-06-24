@@ -327,6 +327,146 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// ─── POST /lint ───────────────────────────────────────────────────────────────
+// Valida o HTML da composição sem renderizar. Síncrono e instantâneo.
+// Use antes do /preview ou /render para capturar erros do agente de IA.
+app.post(
+  '/lint',
+  {
+    schema: {
+      summary: 'Valida uma composição HyperFrames sem renderizar',
+      description:
+        'Executa hyperframes lint no HTML fornecido. Síncrono — responde em menos de 1s. ' +
+        'Retorna valid:true ou a lista de erros encontrados.',
+      body: {
+        type: 'object',
+        required: ['html'],
+        properties: {
+          html: {
+            type: 'string',
+            description: 'Conteúdo do index.html da composição HyperFrames',
+          },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            valid: { type: 'boolean' },
+            errors: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  rule: { type: 'string' },
+                  message: { type: 'string' },
+                  element: { type: 'string' },
+                },
+              },
+            },
+            error_count: { type: 'integer' },
+          },
+        },
+      },
+    },
+  },
+  async (req, reply) => {
+    const { html } = req.body;
+
+    // Arquivo temporário para o lint — não precisa de diretório de job completo
+    const lintId = randomUUID();
+    const lintDir = join(WORK_DIR, `lint-${lintId}`);
+    const lintFile = join(lintDir, 'index.html');
+
+    try {
+      await mkdir(lintDir, { recursive: true });
+      await writeFile(lintFile, html, 'utf8');
+
+      const result = await new Promise((resolve) => {
+        execFile(
+          'npx',
+          ['hyperframes', 'lint', '--input', lintFile, '--json'],
+          { cwd: lintDir, timeout: 15_000 },
+          (err, stdout, stderr) => {
+            resolve({ err, stdout, stderr });
+          }
+        );
+      });
+
+      // hyperframes lint sai com código 0 se válido, não-zero se inválido
+      // Com --json retorna JSON estruturado no stdout
+      if (!result.stdout && result.err) {
+        // Lint não suporta --json ou erro inesperado — fallback para texto
+        const raw = result.stderr || result.err.message || '';
+        const errors = parseTextLintOutput(raw);
+        return reply.send({
+          valid: errors.length === 0,
+          errors,
+          error_count: errors.length,
+        });
+      }
+
+      try {
+        const parsed = JSON.parse(result.stdout);
+        // Normaliza para o formato da nossa resposta
+        const errors = (parsed.errors || parsed.issues || []).map((e) => ({
+          rule: e.rule || e.code || 'unknown',
+          message: e.message || String(e),
+          element: e.element || e.selector || '',
+        }));
+        return reply.send({
+          valid: errors.length === 0,
+          errors,
+          error_count: errors.length,
+        });
+      } catch {
+        // stdout não é JSON — lint provavelmente não suporta --json nessa versão
+        const raw = result.stdout + result.stderr;
+        const errors = parseTextLintOutput(raw);
+        return reply.send({
+          valid: errors.length === 0,
+          errors,
+          error_count: errors.length,
+        });
+      }
+    } finally {
+      // Sempre limpa o arquivo temporário
+      await rm(lintDir, { recursive: true, force: true });
+    }
+  }
+);
+
+/**
+ * Fallback: converte saída de texto do lint em array de erros estruturados.
+ * Usado quando a versão do hyperframes não suporta --json.
+ */
+function parseTextLintOutput(raw) {
+  if (!raw || !raw.trim()) return [];
+
+  const errors = [];
+  const lines = raw.split('\n').filter((l) => l.trim());
+
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    // Ignora linhas de sucesso ou informativas
+    if (lower.includes('✓') || lower.includes('ok') || lower.includes('valid')) continue;
+    if (lower.includes('error') || lower.includes('warning') || lower.includes('✗')) {
+      errors.push({
+        rule: 'lint',
+        message: line.trim(),
+        element: '',
+      });
+    }
+  }
+
+  // Se nenhuma linha pareceu erro mas há conteúdo, trata tudo como erro
+  if (errors.length === 0 && raw.trim()) {
+    errors.push({ rule: 'lint', message: raw.trim(), element: '' });
+  }
+
+  return errors;
+}
+
 // ─── POST /render ─────────────────────────────────────────────────────────────
 app.post(
   '/render',

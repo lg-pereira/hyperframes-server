@@ -8,6 +8,7 @@ API REST para renderização de vídeos com [HyperFrames](https://github.com/hey
 |--------|------|-----------|
 | GET | `/health` | Status do servidor |
 | GET | `/docs` | Documentação Swagger interativa |
+| POST | `/lint` | Valida composição sem renderizar (síncrono, < 1s) |
 | POST | `/preview` | Cria preview ao vivo (instantâneo, sem render) |
 | GET | `/preview/:previewId` | Abre a página de preview no browser |
 | DELETE | `/preview/:previewId` | Remove um preview manualmente |
@@ -79,6 +80,7 @@ curl -X POST http://localhost:3030/render \
 Ver pasta [`docs/`](./docs/) para a referência completa da API e guia de deploy:
 
 - [docs/README.md](./docs/README.md) — Visão geral e fluxos
+- [docs/lint.md](./docs/lint.md) — `POST /lint`
 - [docs/preview.md](./docs/preview.md) — `POST /preview`, `GET /preview/:id`, `DELETE /preview/:id`
 - [docs/render.md](./docs/render.md) — `POST /render`
 - [docs/status.md](./docs/status.md) — `GET /status/:jobId`

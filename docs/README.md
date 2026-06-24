@@ -21,6 +21,7 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 | Método | Rota | Descrição | Documento |
 |--------|------|-----------|-----------|
 | `GET` | `/health` | Status do servidor | [health.md](./health.md) |
+| `POST` | `/lint` | Valida composição sem renderizar (síncrono) | [lint.md](./lint.md) |
 | `POST` | `/preview` | Cria preview ao vivo no browser | [preview.md](./preview.md) |
 | `GET` | `/preview/:previewId` | Abre a página de preview | [preview.md](./preview.md) |
 | `DELETE` | `/preview/:previewId` | Remove um preview | [preview.md](./preview.md) |
@@ -30,6 +31,14 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 | `GET` | `/docs` | Swagger UI interativo | — |
 
 ## Fluxos típicos
+
+### Lint (síncrono)
+
+```
+POST /lint   → valid: true/false + lista de erros (< 1s)
+```
+
+Use para validar a composição antes de qualquer outra chamada.
 
 ### Preview (instantâneo)
 
