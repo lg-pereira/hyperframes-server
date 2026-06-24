@@ -8,8 +8,13 @@ import { createReadStream, existsSync } from 'node:fs';
 const PORT = 3030;
 const HOST = '0.0.0.0';
 const WORK_DIR = '/tmp/hf-jobs';
+const PREVIEW_DIR = '/tmp/hf-previews';
+
+// TTL dos previews em ms (padrão: 2 horas)
+const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
 
 await mkdir(WORK_DIR, { recursive: true });
+await mkdir(PREVIEW_DIR, { recursive: true });
 
 const app = Fastify({
   logger: {
@@ -37,6 +42,13 @@ await app.register(import('@fastify/swagger-ui'), {
   uiConfig: { docExpansion: 'full' },
 });
 
+// ─── Serve arquivos estáticos dos previews ────────────────────────────────────
+await app.register(import('@fastify/static'), {
+  root: PREVIEW_DIR,
+  prefix: '/preview/assets/',
+  decorateReply: false,
+});
+
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get(
   '/health',
@@ -56,6 +68,264 @@ app.get(
   },
   async () => ({ status: 'ok', uptime: process.uptime() })
 );
+
+// ─── POST /preview ────────────────────────────────────────────────────────────
+// Salva a composição e devolve uma URL para visualizar no browser com o
+// <hyperframes-player>. Sem renderização — instantâneo.
+app.post(
+  '/preview',
+  {
+    schema: {
+      summary: 'Cria um preview ao vivo da composição',
+      description:
+        'Salva o HTML e assets, retorna uma URL para abrir no browser. ' +
+        'O preview usa o <hyperframes-player> e expira em 2 horas.',
+      body: {
+        type: 'object',
+        required: ['html'],
+        properties: {
+          html: {
+            type: 'string',
+            description: 'Conteúdo do index.html da composição HyperFrames',
+          },
+          assets: {
+            type: 'array',
+            description: 'Arquivos adicionais (áudio, imagens) em base64',
+            items: {
+              type: 'object',
+              required: ['filename', 'base64'],
+              properties: {
+                filename: { type: 'string' },
+                base64: { type: 'string' },
+              },
+            },
+          },
+          title: {
+            type: 'string',
+            description: 'Título exibido na página de preview',
+            default: 'Preview',
+          },
+        },
+      },
+      response: {
+        201: {
+          type: 'object',
+          properties: {
+            preview_id: { type: 'string' },
+            preview_url: { type: 'string' },
+            expires_in: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+  async (req, reply) => {
+    const { html, assets = [], title = 'Preview' } = req.body;
+
+    const previewId = randomUUID();
+    const previewDir = join(PREVIEW_DIR, previewId);
+    await mkdir(previewDir, { recursive: true });
+
+    // Salva a composição original
+    await writeFile(join(previewDir, 'composition.html'), html, 'utf8');
+
+    // Salva os assets
+    for (const asset of assets) {
+      const buf = Buffer.from(asset.base64, 'base64');
+      await writeFile(join(previewDir, asset.filename), buf);
+    }
+
+    // Monta a página de preview com o <hyperframes-player>
+    // Os assets são servidos via /preview/assets/<previewId>/<filename>
+    const assetPaths = assets.map((a) => a.filename);
+    const compositionWithAssets = rewriteAssetPaths(html, previewId, assetPaths);
+    await writeFile(join(previewDir, 'composition-served.html'), compositionWithAssets, 'utf8');
+
+    const playerHtml = buildPlayerPage(previewId, title);
+    await writeFile(join(previewDir, 'index.html'), playerHtml, 'utf8');
+
+    // Salva metadados para limpeza posterior
+    await writeFile(
+      join(previewDir, 'meta.json'),
+      JSON.stringify({ createdAt: Date.now(), title }),
+      'utf8'
+    );
+
+    // Agenda limpeza automática após TTL
+    setTimeout(
+      () => rm(previewDir, { recursive: true, force: true }),
+      PREVIEW_TTL_MS
+    );
+
+    app.log.info({ previewId }, 'Preview created');
+
+    reply.code(201).send({
+      preview_id: previewId,
+      preview_url: `/preview/${previewId}`,
+      expires_in: '2 horas',
+    });
+  }
+);
+
+// ─── GET /preview/:previewId ──────────────────────────────────────────────────
+app.get(
+  '/preview/:previewId',
+  {
+    schema: {
+      summary: 'Abre a página de preview no browser',
+      params: {
+        type: 'object',
+        properties: { previewId: { type: 'string' } },
+      },
+    },
+  },
+  async (req, reply) => {
+    const { previewId } = req.params;
+    const indexPath = join(PREVIEW_DIR, previewId, 'index.html');
+
+    if (!existsSync(indexPath)) {
+      return reply.code(404).send({ error: 'Preview não encontrado ou expirado' });
+    }
+
+    const html = await readFile(indexPath, 'utf8');
+    reply.header('Content-Type', 'text/html; charset=utf-8').send(html);
+  }
+);
+
+// ─── DELETE /preview/:previewId ───────────────────────────────────────────────
+app.delete(
+  '/preview/:previewId',
+  {
+    schema: {
+      summary: 'Remove um preview manualmente',
+      params: {
+        type: 'object',
+        properties: { previewId: { type: 'string' } },
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: { deleted: { type: 'boolean' } },
+        },
+      },
+    },
+  },
+  async (req, reply) => {
+    const { previewId } = req.params;
+    const previewDir = join(PREVIEW_DIR, previewId);
+
+    if (!existsSync(previewDir)) {
+      return reply.code(404).send({ error: 'Preview não encontrado' });
+    }
+
+    await rm(previewDir, { recursive: true, force: true });
+    app.log.info({ previewId }, 'Preview deleted');
+    return { deleted: true };
+  }
+);
+
+// ─── Helpers de preview ───────────────────────────────────────────────────────
+
+/**
+ * Reescreve os caminhos de assets dentro do HTML para apontar para
+ * /preview/assets/<previewId>/<filename>, que é servido pelo @fastify/static.
+ */
+function rewriteAssetPaths(html, previewId, assetFilenames) {
+  let result = html;
+  for (const filename of assetFilenames) {
+    // Substitui referências simples ao filename por URL absoluta do servidor
+    const escaped = filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result.replace(
+      new RegExp(`(src|href)=["']${escaped}["']`, 'g'),
+      `$1="/preview/assets/${previewId}/${filename}"`
+    );
+  }
+  return result;
+}
+
+/**
+ * Gera a página HTML que carrega o <hyperframes-player> com a composição.
+ */
+function buildPlayerPage(previewId, title) {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(title)} — Preview</title>
+  <script type="module" src="https://cdn.jsdelivr.net/npm/@hyperframes/player/dist/player.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0a0a;
+      color: #f0f0f0;
+      font-family: system-ui, sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+      padding: 1.5rem;
+    }
+    header {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    header h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      opacity: 0.9;
+    }
+    header p {
+      font-size: 0.75rem;
+      opacity: 0.4;
+    }
+    .player-wrapper {
+      width: 100%;
+      max-width: 900px;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 24px 64px rgba(0,0,0,0.6);
+    }
+    hyperframes-player {
+      width: 100%;
+      display: block;
+    }
+    footer {
+      font-size: 0.7rem;
+      opacity: 0.3;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>${escapeHtml(title)}</h1>
+    <p>Preview — HyperFrames Server</p>
+  </header>
+
+  <div class="player-wrapper">
+    <hyperframes-player
+      src="/preview/assets/${previewId}/composition-served.html"
+      controls
+      autoplay
+    ></hyperframes-player>
+  </div>
+
+  <footer>Este preview expira em 2 horas · ID: ${previewId}</footer>
+</body>
+</html>`;
+}
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 // ─── POST /render ─────────────────────────────────────────────────────────────
 app.post(

@@ -25,6 +25,8 @@ services:
     volumes:
       # Persiste os jobs em andamento entre restarts
       - hf_jobs:/tmp/hf-jobs
+      # Persiste os previews entre restarts
+      - hf_previews:/tmp/hf-previews
 
     healthcheck:
       test: ['CMD', 'node', '-e', "fetch('http://localhost:3030/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
@@ -35,3 +37,4 @@ services:
 
 volumes:
   hf_jobs:
+  hf_previews:
