@@ -40,7 +40,7 @@ await app.register(import('@fastify/swagger'), {
 await app.register(import('@fastify/swagger-ui'), {
   routePrefix: '/docs',
   uiConfig: { docExpansion: 'full' },
-  theme: {
+    theme: {
     css: [{ filename: 'theme.css', content: '.topbar { display: none }' }],
   },
 });
@@ -49,6 +49,20 @@ await app.register(import('@fastify/swagger-ui'), {
 await app.register(import('@fastify/static'), {
   root: PREVIEW_DIR,
   prefix: '/preview/assets/',
+  decorateReply: false,
+});
+
+// ─── Serve o @hyperframes/player diretamente do node_modules ─────────────────
+// Evita dependência de CDN externo — funciona offline e na rede Tailscale
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const playerPkg = require.resolve('@hyperframes/player/dist/hyperframes-player.global.js');
+import { dirname } from 'node:path';
+const playerDir = dirname(playerPkg);
+
+await app.register(import('@fastify/static'), {
+  root: playerDir,
+  prefix: '/player/',
   decorateReply: false,
 });
 
@@ -247,7 +261,8 @@ function rewriteAssetPaths(html, previewId, assetFilenames) {
 }
 
 /**
- * Gera a página HTML que carrega o <hyperframes-player> com a composição.
+ * Gera a página HTML que embute a composição diretamente num iframe sem sandbox.
+ * Mais simples e confiável que o <hyperframes-player> para preview interno.
  */
 function buildPlayerPage(previewId, title) {
   return `<!DOCTYPE html>
@@ -256,7 +271,8 @@ function buildPlayerPage(previewId, title) {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${escapeHtml(title)} — Preview</title>
-  <script src="https://cdn.jsdelivr.net/npm/@hyperframes/player/dist/hyperframes-player.global.js"></script>
+  <!-- Player servido localmente do node_modules — sem dependência de CDN -->
+  <script src="/player/hyperframes-player.global.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -295,6 +311,7 @@ function buildPlayerPage(previewId, title) {
     }
     hyperframes-player {
       width: 100%;
+      aspect-ratio: 9 / 16;
       display: block;
     }
     footer {
@@ -321,6 +338,7 @@ function buildPlayerPage(previewId, title) {
 </body>
 </html>`;
 }
+
 
 function escapeHtml(str) {
   return str

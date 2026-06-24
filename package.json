@@ -11,6 +11,7 @@
     "@fastify/static": "7.0.4",
     "@fastify/swagger": "8.15.0",
     "@fastify/swagger-ui": "4.1.0",
+    "@hyperframes/player": "latest",
     "fastify": "4.28.0",
     "hyperframes": "latest",
     "pino-pretty": "13.0.0"
