@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  hyperframes-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hyperframes-server
+    restart: unless-stopped
+
+    # Resolve o problema de PID 1 e processos zumbi do Chromium
+    init: true
+
+    ports:
+      - '3030:3030'
+
+    # Memória compartilhada — obrigatório para o Chromium não crashar
+    shm_size: '2gb'
+
+    environment:
+      - NODE_ENV=production
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+    volumes:
+      # Persiste os jobs em andamento entre restarts
+      - hf_jobs:/tmp/hf-jobs
+
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:3030/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  hf_jobs:
