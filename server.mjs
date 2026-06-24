@@ -4,6 +4,7 @@ import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 
 const PORT = 3030;
 const HOST = '0.0.0.0';
@@ -104,8 +105,6 @@ await app.register(import('@fastify/swagger-ui'), {
   },
 });
 
-// ─── Proxy reverso para os studios hyperframes preview ───────────────────────
-await app.register(import('@fastify/reply-from'));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get(
@@ -227,7 +226,24 @@ app.get(
     if (!entry) return reply.code(404).send({ error: 'Preview não encontrado ou expirado' });
     const subPath = req.params['*'] ?? '';
     const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    return reply.from(`http://localhost:${entry.port}/${subPath}${qs}`);
+    const targetPath = `/${subPath}${qs}`;
+
+    return new Promise((resolve, reject) => {
+      const proxyReq = httpRequest(
+        { hostname: 'localhost', port: entry.port, path: targetPath, method: req.method,
+          headers: { ...req.headers, host: `localhost:${entry.port}` } },
+        (proxyRes) => {
+          reply.code(proxyRes.statusCode);
+          for (const [k, v] of Object.entries(proxyRes.headers)) {
+            if (k !== 'transfer-encoding') reply.header(k, v);
+          }
+          reply.send(proxyRes);
+          resolve();
+        }
+      );
+      proxyReq.on('error', reject);
+      proxyReq.end();
+    });
   }
 );
 
