@@ -123,6 +123,11 @@ app.post(
             description: 'Título exibido na página de preview',
             default: 'Preview',
           },
+          aspect_ratio: {
+            type: 'string',
+            description: 'Aspect ratio do player, ex: "16/9", "9/16", "1/1"',
+            default: '16/9',
+          },
         },
       },
       response: {
@@ -138,7 +143,7 @@ app.post(
     },
   },
   async (req, reply) => {
-    const { html, assets = [], title = 'Preview' } = req.body;
+    const { html, assets = [], title = 'Preview', aspect_ratio = '16/9' } = req.body;
 
     const previewId = randomUUID();
     const previewDir = join(PREVIEW_DIR, previewId);
@@ -159,13 +164,13 @@ app.post(
     const compositionWithAssets = rewriteAssetPaths(html, previewId, assetPaths);
     await writeFile(join(previewDir, 'composition-served.html'), compositionWithAssets, 'utf8');
 
-    const playerHtml = buildPlayerPage(previewId, title);
+    const playerHtml = buildPlayerPage(previewId, title, aspect_ratio);
     await writeFile(join(previewDir, 'index.html'), playerHtml, 'utf8');
 
     // Salva metadados para limpeza posterior
     await writeFile(
       join(previewDir, 'meta.json'),
-      JSON.stringify({ createdAt: Date.now(), title }),
+      JSON.stringify({ createdAt: Date.now(), title, aspect_ratio }),
       'utf8'
     );
 
@@ -265,7 +270,7 @@ function rewriteAssetPaths(html, previewId, assetFilenames) {
  * Gera a página HTML que embute a composição diretamente num iframe sem sandbox.
  * Mais simples e confiável que o <hyperframes-player> para preview interno.
  */
-function buildPlayerPage(previewId, title) {
+function buildPlayerPage(previewId, title, aspectRatio = '16/9') {
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -312,7 +317,7 @@ function buildPlayerPage(previewId, title) {
     }
     hyperframes-player {
       width: 100%;
-      aspect-ratio: 9 / 16;
+      aspect-ratio: ${aspectRatio};
       display: block;
     }
     footer {
@@ -407,7 +412,7 @@ app.post(
       const result = await new Promise((resolve) => {
         execFile(
           'npx',
-          ['hyperframes', 'lint', '--json'],
+          ['hyperframes', 'lint', lintDir, '--json'],
           { cwd: lintDir, timeout: 15_000 },
           (err, stdout, stderr) => {
             resolve({ err, stdout, stderr });
@@ -552,13 +557,14 @@ app.post(
     const outputFile = join(outputDir, 'video.mp4');
 
     // Render em background — não bloqueia a resposta
+    // CLI: hyperframes render [DIR] -o <output> -f <fps> -w <workers>
     execFile(
       'npx',
-      ['hyperframes', 'render',
-        '--input', join(jobDir, 'index.html'),
-        '--output', outputFile,
-        '--fps', String(fps),
-        '--workers', 'auto',
+      ['hyperframes', 'render', jobDir,
+        '-o', outputFile,
+        '-f', String(fps),
+        '-w', 'auto',
+        '--no-browser-gpu',
       ],
       { cwd: jobDir, timeout: 10 * 60 * 1000 }, // timeout 10 min
       async (err) => {
