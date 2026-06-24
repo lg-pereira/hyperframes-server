@@ -256,7 +256,7 @@ function buildPlayerPage(previewId, title) {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${escapeHtml(title)} — Preview</title>
-  <script type="module" src="https://cdn.jsdelivr.net/npm/@hyperframes/player/dist/player.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@hyperframes/player/dist/hyperframes-player.global.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
