@@ -228,17 +228,36 @@ app.get(
     const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
     const targetPath = `/${subPath}${qs}`;
 
+    const prefix = `/preview/${previewId}`;
+
     return new Promise((resolve, reject) => {
       const proxyReq = httpRequest(
         { hostname: 'localhost', port: entry.port, path: targetPath, method: req.method,
           headers: { ...req.headers, host: `localhost:${entry.port}` } },
         (proxyRes) => {
+          const contentType = proxyRes.headers['content-type'] ?? '';
           reply.code(proxyRes.statusCode);
           for (const [k, v] of Object.entries(proxyRes.headers)) {
-            if (k !== 'transfer-encoding') reply.header(k, v);
+            if (k !== 'transfer-encoding' && k !== 'content-length') reply.header(k, v);
           }
-          reply.send(proxyRes);
-          resolve();
+
+          // Rewrite absolute paths in HTML so the browser resolves assets via this proxy
+          if (contentType.includes('text/html')) {
+            const chunks = [];
+            proxyRes.on('data', (c) => chunks.push(c));
+            proxyRes.on('end', () => {
+              const html = Buffer.concat(chunks).toString('utf8')
+                .replace(/(src|href)="\//g, `$1="${prefix}/`)
+                .replace(/url\("\//g, `url("${prefix}/`);
+              reply.header('content-type', 'text/html; charset=utf-8');
+              reply.send(html);
+              resolve();
+            });
+            proxyRes.on('error', reject);
+          } else {
+            reply.send(proxyRes);
+            resolve();
+          }
         }
       );
       proxyReq.on('error', reject);
