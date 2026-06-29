@@ -4,6 +4,10 @@ import { writeFile, mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// Binário local do hyperframes — evita que o npx baixe o pacote a cada chamada
+const HF_BIN = fileURLToPath(new URL('./node_modules/.bin/hyperframes', import.meta.url));
 const PORT = 3030;
 const HOST = '0.0.0.0';
 const WORK_DIR = '/tmp/hf-jobs';
@@ -32,7 +36,7 @@ async function killActivePreview() {
   }
   // Garante que o registry interno do hyperframes seja limpo antes do próximo preview
   await new Promise((resolve) => {
-    execFile('npx', ['hyperframes', 'preview', '--kill-all'], { timeout: 10_000 }, () => resolve());
+    execFile(HF_BIN, ['preview', '--kill-all'], { timeout: 10_000 }, () => resolve());
   });
 }
 
@@ -41,8 +45,8 @@ async function killActivePreview() {
 function spawnPreview(dir, port) {
   return new Promise((resolve, reject) => {
     const proc = execFile(
-      'npx',
-      ['hyperframes', 'preview', '--port', String(port), '--no-open', '--force-new'],
+      HF_BIN,
+      ['preview', '--port', String(port), '--no-open', '--force-new'],
       { cwd: dir, timeout: 0 }
     );
 
@@ -308,8 +312,8 @@ app.post(
 
       const result = await new Promise((resolve) => {
         execFile(
-          'npx',
-          ['hyperframes', 'lint', lintDir, '--json'],
+          HF_BIN,
+          ['lint', lintDir, '--json'],
           { cwd: lintDir, timeout: 15_000 },
           (err, stdout, stderr) => {
             resolve({ err, stdout, stderr });
@@ -456,8 +460,8 @@ app.post(
     // Render em background — não bloqueia a resposta
     // CLI: hyperframes render [DIR] -o <output> -f <fps> -w <workers>
     execFile(
-      'npx',
-      ['hyperframes', 'render', jobDir,
+      HF_BIN,
+      ['render', jobDir,
         '-o', outputFile,
         '-f', String(fps),
         '-w', 'auto',
@@ -560,6 +564,17 @@ app.get(
     setTimeout(() => rm(join(WORK_DIR, jobId), { recursive: true, force: true }), 60_000);
   }
 );
+
+// ─── GET /__hyperframes_config ────────────────────────────────────────────────
+// O studio hyperframes (porta 3031) chama este endpoint na porta 3030 para obter
+// o config do projeto. Retorna o caminho do diretório ativo ou vazio se não há preview.
+app.get('/__hyperframes_config', async (_req, reply) => {
+  if (!activePreview) {
+    return reply.send({});
+  }
+  const previewDir = join(PREVIEW_DIR, activePreview.previewId);
+  reply.send({ projectDir: previewDir, previewId: activePreview.previewId });
+});
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 try {
