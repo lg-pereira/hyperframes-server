@@ -15,8 +15,9 @@ services:
       - '3030:3030'
       - '3031:3031'
 
-    # Memória compartilhada — obrigatório para o Chromium não crashar
-    shm_size: '2gb'
+    # Memória compartilhada — obrigatório para o Chromium não crashar.
+    # 4gb acomoda múltiplos Chromiums em paralelo (RENDER_WORKERS).
+    shm_size: '4gb'
 
     environment:
       - NODE_ENV=production
@@ -30,6 +31,10 @@ services:
       # isso a torna inalcançável pelo port-mapping do Docker. 0.0.0.0 expõe em todas
       # as interfaces para que a porta 3031 publicada funcione.
       - HYPERFRAMES_PREVIEW_HOST=0.0.0.0
+      # Workers paralelos de render. A VPS tem 4 cores; o `auto` calibra a frio e trava
+      # em 1 worker, mas a captura em regime é rápida. Suba/baixe conforme CPU+RAM.
+      # Se ver OOM/crash do Chromium, reduza para 2 (e/ou baixe o shm_size).
+      - RENDER_WORKERS=${RENDER_WORKERS:-4}
 
     volumes:
       # Persiste os jobs em andamento entre restarts

@@ -13,6 +13,11 @@ const HOST = '0.0.0.0';
 const WORK_DIR = '/tmp/hf-jobs';
 const PREVIEW_DIR = '/tmp/hf-previews';
 
+// Nº de workers do render. O `auto` do hyperframes calibra a frio e tende a escolher
+// 1 worker mesmo quando a captura em regime é rápida. Em ARM (modo screenshot) compensa
+// fixar conforme os cores disponíveis. Ajuste via env RENDER_WORKERS no Coolify.
+const RENDER_WORKERS = process.env.RENDER_WORKERS ?? 'auto';
+
 // TTL dos previews em ms (padrão: 2 horas)
 const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -467,7 +472,7 @@ app.post(
       ['render', jobDir,
         '-o', outputFile,
         '-f', String(fps),
-        '-w', 'auto',
+        '-w', String(RENDER_WORKERS),
         '--no-browser-gpu',
       ],
       { cwd: jobDir, timeout: 10 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 }, // timeout 10 min
