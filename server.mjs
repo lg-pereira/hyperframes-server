@@ -584,18 +584,21 @@ app.get(
     }
 
     // Não serve arquivo vazio — sinaliza falha de render em vez de baixar 0 bytes
-    if ((await stat(videoPath)).size === 0) {
+    const { size } = await stat(videoPath);
+    if (size === 0) {
       return reply.code(409).send({ error: 'Render produziu um vídeo vazio. Veja GET /logs/' + jobId });
     }
 
     reply.header('Content-Type', 'video/mp4');
+    reply.header('Content-Length', size);
     reply.header('Content-Disposition', `attachment; filename="video-${jobId}.mp4"`);
 
-    const stream = createReadStream(videoPath);
-    reply.send(stream);
-
-    // Limpa o job 1 min após o download
+    // Limpa o job 1 min após o início do download
     setTimeout(() => rm(join(WORK_DIR, jobId), { recursive: true, force: true }), 60_000);
+
+    // IMPORTANTE: em handler async, é preciso RETORNAR o stream/reply — senão o
+    // Fastify resolve a promise com undefined e corta o corpo (download de 0 bytes).
+    return reply.send(createReadStream(videoPath));
   }
 );
 
