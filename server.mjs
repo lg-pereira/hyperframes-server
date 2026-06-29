@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { execFile } from 'node:child_process';
-import { writeFile, mkdir, rm, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
@@ -457,9 +457,12 @@ app.post(
 
     const outputFile = join(outputDir, 'video.mp4');
 
+    // Acumula stdout/stderr do render para diagnóstico
+    let renderLog = '';
+
     // Render em background — não bloqueia a resposta
     // CLI: hyperframes render [DIR] -o <output> -f <fps> -w <workers>
-    execFile(
+    const proc = execFile(
       HF_BIN,
       ['render', jobDir,
         '-o', outputFile,
@@ -467,17 +470,43 @@ app.post(
         '-w', 'auto',
         '--no-browser-gpu',
       ],
-      { cwd: jobDir, timeout: 10 * 60 * 1000 }, // timeout 10 min
+      { cwd: jobDir, timeout: 10 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 }, // timeout 10 min
       async (err) => {
+        // Sempre persiste o log do render para diagnóstico
+        await writeFile(join(jobDir, 'render.log'), renderLog, 'utf8').catch(() => {});
+
+        // Falha explícita do processo (exit != 0, timeout, etc.)
         if (err) {
           app.log.error({ jobId, err: err.message }, 'Render failed');
-          await writeFile(join(jobDir, 'error.txt'), err.message, 'utf8');
-        } else {
-          app.log.info({ jobId }, 'Render complete');
+          await writeFile(join(jobDir, 'error.txt'), `${err.message}\n\n--- log ---\n${renderLog}`, 'utf8');
+          return;
+        }
+
+        // Exit 0 NÃO garante vídeo: valida que o arquivo existe e não está vazio
+        let size = 0;
+        try { size = (await stat(outputFile)).size; } catch {}
+        if (size > 0) {
+          app.log.info({ jobId, size }, 'Render complete');
           await writeFile(join(jobDir, 'done.txt'), 'ok', 'utf8');
+        } else {
+          app.log.error({ jobId }, 'Render terminou com exit 0 mas o vídeo está vazio/ausente');
+          await writeFile(
+            join(jobDir, 'error.txt'),
+            `Render saiu com código 0 mas ${outputFile} ficou vazio ou ausente (${size} bytes).\n\n--- log ---\n${renderLog}`,
+            'utf8'
+          );
         }
       }
     );
+
+    // Captura stdout/stderr do render para o log do job e para o console do container
+    const onRenderChunk = (chunk) => {
+      const text = chunk.toString();
+      renderLog += text;
+      process.stdout.write(`[render ${jobId.slice(0, 8)}] ${text}`);
+    };
+    proc.stdout?.on('data', onRenderChunk);
+    proc.stderr?.on('data', onRenderChunk);
 
     reply.code(202).send({
       job_id: jobId,
@@ -554,6 +583,11 @@ app.get(
       return reply.code(404).send({ error: 'Vídeo não encontrado ou ainda em processamento' });
     }
 
+    // Não serve arquivo vazio — sinaliza falha de render em vez de baixar 0 bytes
+    if ((await stat(videoPath)).size === 0) {
+      return reply.code(409).send({ error: 'Render produziu um vídeo vazio. Veja GET /logs/' + jobId });
+    }
+
     reply.header('Content-Type', 'video/mp4');
     reply.header('Content-Disposition', `attachment; filename="video-${jobId}.mp4"`);
 
@@ -562,6 +596,26 @@ app.get(
 
     // Limpa o job 1 min após o download
     setTimeout(() => rm(join(WORK_DIR, jobId), { recursive: true, force: true }), 60_000);
+  }
+);
+
+// ─── GET /logs/:jobId ─────────────────────────────────────────────────────────
+// Retorna o stdout/stderr capturado do hyperframes render, em texto puro.
+app.get(
+  '/logs/:jobId',
+  {
+    schema: {
+      summary: 'Retorna o log do render (stdout/stderr) de um job',
+      params: { type: 'object', properties: { jobId: { type: 'string' } } },
+    },
+  },
+  async (req, reply) => {
+    const logPath = join(WORK_DIR, req.params.jobId, 'render.log');
+    if (!existsSync(logPath)) {
+      return reply.code(404).send({ error: 'Log não encontrado (job inexistente ou ainda em processamento)' });
+    }
+    reply.header('Content-Type', 'text/plain; charset=utf-8');
+    return reply.send(await readFile(logPath, 'utf8'));
   }
 );
 
