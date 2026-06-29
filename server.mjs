@@ -22,21 +22,28 @@ const PUBLIC_PREVIEW_URL = (process.env.PUBLIC_PREVIEW_URL ?? `http://localhost:
 // Apenas um preview ativo por vez
 let activePreview = null; // { proc, previewId, timer }
 
-function killActivePreview() {
-  if (!activePreview) return;
-  clearTimeout(activePreview.timer);
-  try { activePreview.proc.kill('SIGTERM'); } catch {}
-  rm(join(PREVIEW_DIR, activePreview.previewId), { recursive: true, force: true }).catch(() => {});
-  activePreview = null;
+// Mata o processo ativo e limpa todos os studios registrados pelo hyperframes
+async function killActivePreview() {
+  if (activePreview) {
+    clearTimeout(activePreview.timer);
+    try { activePreview.proc.kill('SIGTERM'); } catch {}
+    rm(join(PREVIEW_DIR, activePreview.previewId), { recursive: true, force: true }).catch(() => {});
+    activePreview = null;
+  }
+  // Garante que o registry interno do hyperframes seja limpo antes do próximo preview
+  await new Promise((resolve) => {
+    execFile('npx', ['hyperframes', 'preview', '--kill-all'], { timeout: 10_000 }, () => resolve());
+  });
 }
 
-// Spawna hyperframes preview no diretório da composição e aguarda o studio ficar pronto
+// Spawna hyperframes preview no diretório da composição.
+// Parseia a porta real do stdout (pode diferir da solicitada se houver conflito).
 function spawnPreview(dir, port) {
   return new Promise((resolve, reject) => {
     const proc = execFile(
       'npx',
-      ['hyperframes', 'preview', '--port', String(port), '--no-open'],
-      { cwd: dir, timeout: 0 }   // cwd = projeto; sem argumento DIR, usa o diretório atual
+      ['hyperframes', 'preview', '--port', String(port), '--no-open', '--force-new'],
+      { cwd: dir, timeout: 0 }
     );
 
     const readyTimeout = setTimeout(
@@ -44,12 +51,28 @@ function spawnPreview(dir, port) {
       30_000
     );
 
+    let resolved = false;
     const onChunk = (chunk) => {
       const text = chunk.toString();
-      process.stdout.write(`[preview] ${text}`); // log para diagnóstico
-      if (text.includes('Studio running') || text.includes(`localhost:${port}`)) {
+      process.stdout.write(`[preview] ${text}`);
+
+      if (resolved) return;
+
+      // Parseia a porta real: "Studio    http://localhost:XXXX"
+      const portMatch = text.match(/Studio\s+http:\/\/localhost:(\d+)/);
+      if (portMatch) {
+        resolved = true;
         clearTimeout(readyTimeout);
-        resolve(proc);
+        resolve({ proc, actualPort: parseInt(portMatch[1]) });
+        return;
+      }
+
+      // Fallback: qualquer menção ao localhost com porta
+      const fallback = text.match(/http:\/\/localhost:(\d+)/);
+      if (fallback && text.includes('Studio')) {
+        resolved = true;
+        clearTimeout(readyTimeout);
+        resolve({ proc, actualPort: parseInt(fallback[1]) });
       }
     };
 
@@ -57,7 +80,7 @@ function spawnPreview(dir, port) {
     proc.stderr?.on('data', onChunk);
     proc.on('error', (err) => { clearTimeout(readyTimeout); reject(err); });
     proc.on('exit', (code) => {
-      if (code != null && code !== 0) {
+      if (!resolved && code != null && code !== 0) {
         clearTimeout(readyTimeout);
         reject(new Error(`hyperframes preview saiu com código ${code}`));
       }
@@ -164,8 +187,8 @@ app.post(
   async (req, reply) => {
     const { html, assets = [] } = req.body;
 
-    // Encerra qualquer preview anterior antes de iniciar um novo
-    killActivePreview();
+    // Encerra qualquer preview anterior e limpa o registry do hyperframes
+    await killActivePreview();
 
     const previewId = randomUUID();
     const previewDir = join(PREVIEW_DIR, previewId);
@@ -176,22 +199,28 @@ app.post(
       await writeFile(join(previewDir, asset.filename), Buffer.from(asset.base64, 'base64'));
     }
 
-    let proc;
+    let proc, actualPort;
     try {
-      proc = await spawnPreview(previewDir, PREVIEW_PORT);
+      ({ proc, actualPort } = await spawnPreview(previewDir, PREVIEW_PORT));
     } catch (err) {
       await rm(previewDir, { recursive: true, force: true });
       return reply.code(500).send({ error: err.message });
     }
 
+    // Reconstrói a URL pública usando a porta real (pode diferir de PREVIEW_PORT)
+    const basePublic = PUBLIC_PREVIEW_URL.replace(/:\d+$/, '');
+    const previewUrl = actualPort === PREVIEW_PORT
+      ? PUBLIC_PREVIEW_URL
+      : `${basePublic}:${actualPort}`;
+
     const timer = setTimeout(() => killActivePreview(), PREVIEW_TTL_MS);
     activePreview = { proc, previewId, timer };
 
-    app.log.info({ previewId, port: PREVIEW_PORT }, 'Preview started');
+    app.log.info({ previewId, port: actualPort }, 'Preview started');
 
     reply.code(201).send({
       preview_id: previewId,
-      preview_url: PUBLIC_PREVIEW_URL,
+      preview_url: previewUrl,
       expires_in: '2 horas',
     });
   }
@@ -216,7 +245,7 @@ app.delete(
     if (!activePreview || activePreview.previewId !== req.params.previewId) {
       return reply.code(404).send({ error: 'Preview não encontrado' });
     }
-    killActivePreview();
+    await killActivePreview();
     app.log.info({ previewId: req.params.previewId }, 'Preview deleted');
     return { deleted: true };
   }
