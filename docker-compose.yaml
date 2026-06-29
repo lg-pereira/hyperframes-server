@@ -22,8 +22,10 @@ services:
       - NODE_ENV=production
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-      # URL pública da porta do preview studio — configure com o IP/domínio do VPS
-      - PUBLIC_PREVIEW_URL=http://localhost:3031
+      # URL pública da porta do preview studio — DEVE ser o IP/domínio acessível
+      # pelo navegador do usuário (NÃO localhost). Sobrescreva no painel do Coolify.
+      # Ex: http://meu-vps.com:3031 ou http://<IP_DO_VPS>:3031
+      - PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL:-http://100.121.2.102:3031}
 
     volumes:
       # Persiste os jobs em andamento entre restarts

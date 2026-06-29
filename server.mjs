@@ -565,17 +565,6 @@ app.get(
   }
 );
 
-// ─── GET /__hyperframes_config ────────────────────────────────────────────────
-// O studio hyperframes (porta 3031) chama este endpoint na porta 3030 para obter
-// o config do projeto. Retorna o caminho do diretório ativo ou vazio se não há preview.
-app.get('/__hyperframes_config', async (_req, reply) => {
-  if (!activePreview) {
-    return reply.send({});
-  }
-  const previewDir = join(PREVIEW_DIR, activePreview.previewId);
-  reply.send({ projectDir: previewDir, previewId: activePreview.previewId });
-});
-
 // ─── Start ────────────────────────────────────────────────────────────────────
 try {
   await app.listen({ port: PORT, host: HOST });
