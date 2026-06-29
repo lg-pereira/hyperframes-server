@@ -4,8 +4,6 @@ import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
-
 const PORT = 3030;
 const HOST = '0.0.0.0';
 const WORK_DIR = '/tmp/hf-jobs';
@@ -14,29 +12,22 @@ const PREVIEW_DIR = '/tmp/hf-previews';
 // TTL dos previews em ms (padrão: 2 horas)
 const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
 
-// Pool de portas internas para os processos hyperframes preview
-const PREVIEW_PORT_MIN = parseInt(process.env.PREVIEW_PORT_MIN ?? '3100');
-const PREVIEW_PORT_MAX = parseInt(process.env.PREVIEW_PORT_MAX ?? '3199');
-const availablePorts = new Set(
-  Array.from({ length: PREVIEW_PORT_MAX - PREVIEW_PORT_MIN + 1 }, (_, i) => PREVIEW_PORT_MIN + i)
-);
+// Porta dedicada para o studio hyperframes preview.
+// Deve ser exposta no docker-compose e acessível de fora do container.
+// PUBLIC_PREVIEW_URL é a URL base pública para o browser acessar essa porta.
+// Ex: PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
+const PREVIEW_PORT = parseInt(process.env.PREVIEW_PORT ?? '3031');
+const PUBLIC_PREVIEW_URL = (process.env.PUBLIC_PREVIEW_URL ?? `http://localhost:${PREVIEW_PORT}`).replace(/\/$/, '');
 
-// Processos ativos: previewId → { proc, port, timer }
-const activePreviews = new Map();
+// Apenas um preview ativo por vez (o studio ocupa a porta inteira)
+let activePreview = null; // { proc, previewId, timer }
 
-function acquirePort() {
-  for (const p of availablePorts) { availablePorts.delete(p); return p; }
-  throw new Error('Sem portas disponíveis — limite de previews simultâneos atingido');
-}
-
-function releasePreview(previewId) {
-  const entry = activePreviews.get(previewId);
-  if (!entry) return;
-  clearTimeout(entry.timer);
-  try { entry.proc.kill('SIGTERM'); } catch {}
-  availablePorts.add(entry.port);
-  activePreviews.delete(previewId);
-  rm(join(PREVIEW_DIR, previewId), { recursive: true, force: true }).catch(() => {});
+function killActivePreview() {
+  if (!activePreview) return;
+  clearTimeout(activePreview.timer);
+  try { activePreview.proc.kill('SIGTERM'); } catch {}
+  rm(join(PREVIEW_DIR, activePreview.previewId), { recursive: true, force: true }).catch(() => {});
+  activePreview = null;
 }
 
 // Spawna hyperframes preview e aguarda o studio ficar pronto (stdout "running at")
@@ -172,6 +163,9 @@ app.post(
   async (req, reply) => {
     const { html, assets = [] } = req.body;
 
+    // Encerra qualquer preview anterior antes de iniciar um novo
+    killActivePreview();
+
     const previewId = randomUUID();
     const previewDir = join(PREVIEW_DIR, previewId);
     await mkdir(previewDir, { recursive: true });
@@ -181,87 +175,23 @@ app.post(
       await writeFile(join(previewDir, asset.filename), Buffer.from(asset.base64, 'base64'));
     }
 
-    const port = acquirePort();
-
     let proc;
     try {
-      proc = await spawnPreview(previewDir, port);
+      proc = await spawnPreview(previewDir, PREVIEW_PORT);
     } catch (err) {
-      releasePreview(previewId);
-      availablePorts.add(port);
+      await rm(previewDir, { recursive: true, force: true });
       return reply.code(500).send({ error: err.message });
     }
 
-    const timer = setTimeout(() => releasePreview(previewId), PREVIEW_TTL_MS);
-    activePreviews.set(previewId, { proc, port, timer });
+    const timer = setTimeout(() => killActivePreview(), PREVIEW_TTL_MS);
+    activePreview = { proc, previewId, timer };
 
-    app.log.info({ previewId, port }, 'Preview started');
+    app.log.info({ previewId, port: PREVIEW_PORT }, 'Preview started');
 
     reply.code(201).send({
       preview_id: previewId,
-      preview_url: `/preview/${previewId}/`,
+      preview_url: PUBLIC_PREVIEW_URL,
       expires_in: '2 horas',
-    });
-  }
-);
-
-// ─── GET /preview/:previewId/* — proxy para o studio interno ─────────────────
-app.get(
-  '/preview/:previewId/*',
-  {
-    schema: {
-      summary: 'Acessa o studio de preview proxiado',
-      params: {
-        type: 'object',
-        properties: {
-          previewId: { type: 'string' },
-          '*': { type: 'string' },
-        },
-      },
-    },
-  },
-  async (req, reply) => {
-    const { previewId } = req.params;
-    const entry = activePreviews.get(previewId);
-    if (!entry) return reply.code(404).send({ error: 'Preview não encontrado ou expirado' });
-    const subPath = req.params['*'] ?? '';
-    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    const targetPath = `/${subPath}${qs}`;
-
-    const prefix = `/preview/${previewId}`;
-
-    return new Promise((resolve, reject) => {
-      const proxyReq = httpRequest(
-        { hostname: 'localhost', port: entry.port, path: targetPath, method: req.method,
-          headers: { ...req.headers, host: `localhost:${entry.port}` } },
-        (proxyRes) => {
-          const contentType = proxyRes.headers['content-type'] ?? '';
-          reply.code(proxyRes.statusCode);
-          for (const [k, v] of Object.entries(proxyRes.headers)) {
-            if (k !== 'transfer-encoding' && k !== 'content-length') reply.header(k, v);
-          }
-
-          // Rewrite absolute paths in HTML so the browser resolves assets via this proxy
-          if (contentType.includes('text/html')) {
-            const chunks = [];
-            proxyRes.on('data', (c) => chunks.push(c));
-            proxyRes.on('end', () => {
-              const html = Buffer.concat(chunks).toString('utf8')
-                .replace(/(src|href)="\//g, `$1="${prefix}/`)
-                .replace(/url\("\//g, `url("${prefix}/`);
-              reply.header('content-type', 'text/html; charset=utf-8');
-              reply.send(html);
-              resolve();
-            });
-            proxyRes.on('error', reject);
-          } else {
-            reply.send(proxyRes);
-            resolve();
-          }
-        }
-      );
-      proxyReq.on('error', reject);
-      proxyReq.end();
     });
   }
 );
@@ -271,7 +201,7 @@ app.delete(
   '/preview/:previewId',
   {
     schema: {
-      summary: 'Encerra um preview e libera a porta',
+      summary: 'Encerra o preview ativo',
       params: {
         type: 'object',
         properties: { previewId: { type: 'string' } },
@@ -282,12 +212,11 @@ app.delete(
     },
   },
   async (req, reply) => {
-    const { previewId } = req.params;
-    if (!activePreviews.has(previewId)) {
+    if (!activePreview || activePreview.previewId !== req.params.previewId) {
       return reply.code(404).send({ error: 'Preview não encontrado' });
     }
-    releasePreview(previewId);
-    app.log.info({ previewId }, 'Preview deleted');
+    killActivePreview();
+    app.log.info({ previewId: req.params.previewId }, 'Preview deleted');
     return { deleted: true };
   }
 );
