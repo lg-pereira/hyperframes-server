@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { execFile } from 'node:child_process';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
@@ -12,14 +12,14 @@ const PREVIEW_DIR = '/tmp/hf-previews';
 // TTL dos previews em ms (padrão: 2 horas)
 const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
 
-// Porta dedicada para o studio hyperframes preview.
+// Porta dedicada ao studio hyperframes preview.
 // Deve ser exposta no docker-compose e acessível de fora do container.
 // PUBLIC_PREVIEW_URL é a URL base pública para o browser acessar essa porta.
 // Ex: PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
 const PREVIEW_PORT = parseInt(process.env.PREVIEW_PORT ?? '3031');
 const PUBLIC_PREVIEW_URL = (process.env.PUBLIC_PREVIEW_URL ?? `http://localhost:${PREVIEW_PORT}`).replace(/\/$/, '');
 
-// Apenas um preview ativo por vez (o studio ocupa a porta inteira)
+// Apenas um preview ativo por vez
 let activePreview = null; // { proc, previewId, timer }
 
 function killActivePreview() {
@@ -30,13 +30,13 @@ function killActivePreview() {
   activePreview = null;
 }
 
-// Spawna hyperframes preview e aguarda o studio ficar pronto (stdout "running at")
+// Spawna hyperframes preview no diretório da composição e aguarda o studio ficar pronto
 function spawnPreview(dir, port) {
   return new Promise((resolve, reject) => {
     const proc = execFile(
       'npx',
-      ['hyperframes', 'preview', dir, '--port', String(port), '--no-open'],
-      { timeout: 0 }
+      ['hyperframes', 'preview', '--port', String(port), '--no-open'],
+      { cwd: dir, timeout: 0 }   // cwd = projeto; sem argumento DIR, usa o diretório atual
     );
 
     const readyTimeout = setTimeout(
@@ -46,7 +46,7 @@ function spawnPreview(dir, port) {
 
     const onChunk = (chunk) => {
       const text = chunk.toString();
-      if (text.includes('running at') || text.includes(`localhost:${port}`)) {
+      if (text.includes('running at') || text.includes(`localhost:${port}`) || text.includes('Studio')) {
         clearTimeout(readyTimeout);
         resolve(proc);
       }
@@ -174,6 +174,10 @@ app.post(
     for (const asset of assets) {
       await writeFile(join(previewDir, asset.filename), Buffer.from(asset.base64, 'base64'));
     }
+
+    // Estrutura mínima de projeto necessária para o hyperframes preview reconhecer o diretório
+    await writeFile(join(previewDir, 'hyperframes.json'), JSON.stringify({ version: '1' }), 'utf8');
+    await writeFile(join(previewDir, 'meta.json'), JSON.stringify({ name: previewId, duration: 10 }), 'utf8');
 
     let proc;
     try {
