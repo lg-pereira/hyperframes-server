@@ -26,6 +26,10 @@ services:
       # pelo navegador do usuário (NÃO localhost). Sobrescreva no painel do Coolify.
       # Ex: http://meu-vps.com:3031 ou http://<IP_DO_VPS>:3031
       - PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL:-http://100.121.2.102:3031}
+      # A Studio do hyperframes faz bind em 127.0.0.1 por padrão; dentro do container
+      # isso a torna inalcançável pelo port-mapping do Docker. 0.0.0.0 expõe em todas
+      # as interfaces para que a porta 3031 publicada funcione.
+      - HYPERFRAMES_PREVIEW_HOST=0.0.0.0
 
     volumes:
       # Persiste os jobs em andamento entre restarts
