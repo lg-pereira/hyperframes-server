@@ -68,9 +68,15 @@ Use antes de chamar `/preview` ou `/render` para capturar erros de estrutura do 
 
 ## Como funciona
 
-O `/lint` é **síncrono**: bloqueia até o processo terminar e devolve o resultado direto na resposta — diferente do `/render`, que retorna imediatamente com um `job_id` e processa em background.
+O `/lint` é **síncrono**: bloqueia até o processo terminar e devolve o resultado direto na resposta — diferente do `/render`, que retorna imediatamente com um `job_id`.
 
-Internamente, executa `npx hyperframes lint --input <file> --json` e tem dois modos de operação dependendo da versão do HyperFrames instalada:
+Internamente executa:
+
+```
+hyperframes lint <dir> --json
+```
+
+O HTML é salvo em um diretório temporário e o lint recebe o **diretório** (não o arquivo). Tem dois modos de operação dependendo da versão do HyperFrames instalada:
 
 | Modo | Quando | Comportamento |
 |------|--------|---------------|
@@ -81,7 +87,7 @@ O formato da resposta é sempre o mesmo independente do modo — você nunca rec
 
 ## Exemplos cURL
 
-### Composição válida
+### Verificação simples
 
 ```bash
 curl -s -X POST http://localhost:3030/lint \
@@ -100,7 +106,7 @@ VALID=$(curl -s -X POST http://localhost:3030/lint \
   | jq -r '.valid')
 
 if [ "$VALID" = "true" ]; then
-  echo "Composição válida, prosseguindo com o render..."
+  echo "Composição válida, prosseguindo..."
 else
   echo "Erros encontrados, abortando."
   exit 1
@@ -135,7 +141,7 @@ echo "Render iniciado: $JOB_ID"
 
 ## Notas
 
-- Timeout interno de **15 segundos** — se o processo não responder, a requisição falha
+- Timeout interno de **15 segundos**
 - Os arquivos temporários criados durante o lint são **sempre removidos** ao final, mesmo em caso de erro
 - Não valida assets (imagens, áudio) — apenas a estrutura do HTML
-- Use no início do pipeline, antes de `/preview` ou `/render`, para economizar tempo em composições com erros
+- Use no início do pipeline, antes de `/preview` ou `/render`, para economizar tempo

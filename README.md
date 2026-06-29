@@ -9,12 +9,12 @@ API REST para renderização de vídeos com [HyperFrames](https://github.com/hey
 | GET | `/health` | Status do servidor |
 | GET | `/docs` | Documentação Swagger interativa |
 | POST | `/lint` | Valida composição sem renderizar (síncrono, < 1s) |
-| POST | `/preview` | Cria preview ao vivo (instantâneo, sem render) |
-| GET | `/preview/:previewId` | Abre a página de preview no browser |
-| DELETE | `/preview/:previewId` | Remove um preview manualmente |
+| POST | `/preview` | Inicia o studio de preview (1 ativo por vez) |
+| DELETE | `/preview/:previewId` | Encerra o preview ativo |
 | POST | `/render` | Envia composição HTML para renderizar |
 | GET | `/status/:jobId` | Verifica status do job |
 | GET | `/download/:jobId` | Baixa o MP4 gerado |
+| GET | `/logs/:jobId` | Log do processo render (diagnóstico) |
 
 ## Uso rápido
 
@@ -81,7 +81,8 @@ Ver pasta [`docs/`](./docs/) para a referência completa da API e guia de deploy
 
 - [docs/README.md](./docs/README.md) — Visão geral e fluxos
 - [docs/lint.md](./docs/lint.md) — `POST /lint`
-- [docs/preview.md](./docs/preview.md) — `POST /preview`, `GET /preview/:id`, `DELETE /preview/:id`
+- [docs/preview.md](./docs/preview.md) — `POST /preview`, `DELETE /preview/:id`
+- [docs/logs.md](./docs/logs.md) — `GET /logs/:jobId`
 - [docs/render.md](./docs/render.md) — `POST /render`
 - [docs/status.md](./docs/status.md) — `GET /status/:jobId`
 - [docs/download.md](./docs/download.md) — `GET /download/:jobId`

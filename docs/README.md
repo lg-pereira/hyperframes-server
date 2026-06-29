@@ -22,12 +22,12 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 |--------|------|-----------|-----------|
 | `GET` | `/health` | Status do servidor | [health.md](./health.md) |
 | `POST` | `/lint` | Valida composição sem renderizar (síncrono) | [lint.md](./lint.md) |
-| `POST` | `/preview` | Cria preview ao vivo no browser | [preview.md](./preview.md) |
-| `GET` | `/preview/:previewId` | Abre a página de preview | [preview.md](./preview.md) |
-| `DELETE` | `/preview/:previewId` | Remove um preview | [preview.md](./preview.md) |
+| `POST` | `/preview` | Inicia o studio de preview | [preview.md](./preview.md) |
+| `DELETE` | `/preview/:previewId` | Encerra o preview ativo | [preview.md](./preview.md) |
 | `POST` | `/render` | Submete composição HTML para renderização | [render.md](./render.md) |
 | `GET` | `/status/:jobId` | Verifica status de um job | [status.md](./status.md) |
 | `GET` | `/download/:jobId` | Baixa o MP4 gerado | [download.md](./download.md) |
+| `GET` | `/logs/:jobId` | Log do processo render (diagnóstico) | [logs.md](./logs.md) |
 | `GET` | `/docs` | Swagger UI interativo | — |
 
 ## Fluxos típicos
@@ -40,14 +40,13 @@ POST /lint   → valid: true/false + lista de erros (< 1s)
 
 Use para validar a composição antes de qualquer outra chamada.
 
-### Preview (instantâneo)
+### Preview (studio ao vivo)
 
 ```
-POST /preview   → recebe preview_url (201 Created)
-      ↓
-GET  /preview/:previewId → abre no browser com <hyperframes-player>
+POST /preview   → recebe preview_url (201 Created) — URL pública do studio
 ```
 
+Abre diretamente no browser. **1 preview ativo por vez** — chamar novamente encerra o anterior.  
 Use para visualizar e ajustar a composição antes de renderizar.
 
 ### Render (assíncrono)

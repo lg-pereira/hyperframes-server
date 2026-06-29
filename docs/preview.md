@@ -1,18 +1,18 @@
 # Preview
 
-Endpoints para criar e gerenciar previews ao vivo de composições HyperFrames.
+Endpoints para criar e encerrar previews ao vivo de composições HyperFrames.
 
-Ao contrário do `/render`, o preview **não gera vídeo** — ele spawna o `hyperframes preview` (o studio interativo do HyperFrames) em um processo isolado e proxia o acesso via URL do servidor. O resultado é o studio completo abrindo no browser, com playback, scrubbing e hot-reload.
+O preview spawna o `hyperframes preview` (o studio interativo) em uma **porta dedicada** e retorna a URL pública para abrir no browser. Diferente do `/render`, nenhum vídeo é gerado — o studio processa a composição em tempo real.
 
-**Armazenamento:** `/tmp/hf-previews/{previewId}/`  
-**TTL:** processos são encerrados automaticamente em **2 horas**.  
-**Concorrência:** até **100 previews simultâneos** (portas internas `3100–3199`, configuráveis por env).
+**Apenas 1 preview ativo por vez.** Chamar `POST /preview` enquanto já existe um ativo encerra o anterior automaticamente.  
+**Porta:** `PREVIEW_PORT` (padrão: `3031`) — deve estar exposta no Docker/firewall.  
+**TTL:** o processo é encerrado automaticamente em **2 horas**.
 
 ---
 
 ## POST /preview
 
-Salva a composição, spawna o `hyperframes preview` em uma porta interna e retorna a URL proxiada para abrir no browser.
+Encerra o preview anterior (se houver), salva a composição no disco, spawna o studio e retorna a URL pública.
 
 ### Request
 
@@ -60,23 +60,23 @@ Salva a composição, spawna o `hyperframes preview` em uma porta interna e reto
 ```json
 {
   "preview_id": "550e8400-e29b-41d4-a716-446655440000",
-  "preview_url": "/preview/550e8400-e29b-41d4-a716-446655440000/",
+  "preview_url": "http://meu-servidor.com:3031",
   "expires_in": "2 horas"
 }
 ```
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
-| `preview_id` | `string` | UUID único do preview |
-| `preview_url` | `string` | Caminho para abrir no browser (note a `/` final) |
-| `expires_in` | `string` | Tempo até o processo ser encerrado |
+| `preview_id` | `string` | UUID do preview — use para encerrar via DELETE |
+| `preview_url` | `string` | URL pública do studio (valor de `PUBLIC_PREVIEW_URL`) |
+| `expires_in` | `string` | Tempo até o processo ser encerrado automaticamente |
 
 #### 500 Internal Server Error
 
-Retornado quando o limite de previews simultâneos foi atingido (todas as 100 portas ocupadas) ou quando o processo `hyperframes preview` falhou ao iniciar.
+Retornado quando o `hyperframes preview` não iniciou em 30 segundos ou saiu com erro.
 
 ```json
-{ "error": "Sem portas disponíveis — limite de previews simultâneos atingido" }
+{ "error": "hyperframes preview não iniciou em 30s" }
 ```
 
 ### Exemplo cURL
@@ -97,19 +97,19 @@ URL=$(curl -s -X POST http://localhost:3030/preview \
   -d '{"html":"<div data-width=\"1920\" data-height=\"1080\"><h1 data-duration=\"3\">Teste</h1></div>"}' \
   | jq -r '.preview_url')
 
-open "http://localhost:3030$URL"
+open "$URL"
 ```
 
 ---
 
-## GET /preview/:previewId/*
+## DELETE /preview/:previewId
 
-Proxy reverso para o studio `hyperframes preview` rodando na porta interna do processo. Qualquer sub-rota é repassada ao processo — o studio do HyperFrames pode servir assets, websockets e rotas internas normalmente.
+Encerra o studio, libera a porta e remove os arquivos do preview.
 
 ### Request
 
-**Method:** `GET`  
-**Path:** `/preview/:previewId/` (e qualquer sub-rota, ex: `/preview/:previewId/assets/logo.png`)
+**Method:** `DELETE`  
+**Path:** `/preview/:previewId`
 
 #### Path Parameters
 
@@ -121,47 +121,13 @@ Proxy reverso para o studio `hyperframes preview` rodando na porta interna do pr
 
 #### 200 OK
 
-Resposta proxiada do `hyperframes preview` — normalmente a página HTML do studio.
-
-#### 404 Not Found
-
-```json
-{ "error": "Preview não encontrado ou expirado" }
-```
-
-### Exemplo
-
-```bash
-# Abrir o studio no browser (macOS)
-open "http://localhost:3030/preview/550e8400-e29b-41d4-a716-446655440000/"
-```
-
----
-
-## DELETE /preview/:previewId
-
-Encerra o processo `hyperframes preview`, libera a porta interna e remove os arquivos. Use quando quiser fechar o preview antes do TTL de 2 horas.
-
-### Request
-
-**Method:** `DELETE`  
-**Path:** `/preview/:previewId`
-
-#### Path Parameters
-
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `previewId` | `string` | UUID do preview a encerrar |
-
-### Response
-
-#### 200 OK
-
 ```json
 { "deleted": true }
 ```
 
 #### 404 Not Found
+
+Retornado quando o `previewId` não corresponde ao preview ativo (ou não há preview ativo).
 
 ```json
 { "error": "Preview não encontrado" }
@@ -179,20 +145,21 @@ curl -X DELETE http://localhost:3030/preview/550e8400-e29b-41d4-a716-44665544000
 
 ```
 POST /preview
+  ├── killActivePreview()
+  │     ├── SIGTERM no processo anterior (se houver)
+  │     ├── rm /tmp/hf-previews/{previewId anterior}/
+  │     └── executa: hyperframes preview --kill-all  (limpa registry interno)
   ├── salva index.html + assets em /tmp/hf-previews/{previewId}/
-  ├── acquirePort() → pega uma porta do pool (3100–3199)
-  ├── spawnPreview() → executa: npx hyperframes preview <dir> --port <porta> --no-open
-  │     └── aguarda "running at" no stdout/stderr (timeout: 30s)
-  └── registra em activePreviews: { proc, port, timer }
+  ├── spawnPreview(dir, PREVIEW_PORT)
+  │     ├── executa: hyperframes preview --port 3031 --no-open --force-new
+  │     ├── aguarda linha "Studio  http://localhost:XXXX" no stdout (timeout: 30s)
+  │     └── parseia a porta **real** (pode diferir de PREVIEW_PORT se houver conflito)
+  ├── reconstrói preview_url com a porta real e PUBLIC_PREVIEW_URL
+  ├── agenda killActivePreview() após PREVIEW_TTL_MS (2h)
+  └── responde 201 com preview_url
 
-GET /preview/:previewId/*
-  └── proxy via @fastify/reply-from → http://localhost:{porta}/{sub-rota}
-
-DELETE /preview/:previewId  (ou TTL expirar)
-  ├── proc.kill('SIGTERM')
-  ├── availablePorts.add(porta)   ← porta retorna ao pool
-  ├── activePreviews.delete(previewId)
-  └── rm /tmp/hf-previews/{previewId}/
+DELETE /preview/:previewId
+  └── killActivePreview() → SIGTERM + --kill-all + rm dir
 ```
 
 ---
@@ -201,15 +168,24 @@ DELETE /preview/:previewId  (ou TTL expirar)
 
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
-| `PREVIEW_PORT_MIN` | `3100` | Primeira porta do pool interno |
-| `PREVIEW_PORT_MAX` | `3199` | Última porta do pool interno (máx: `MAX - MIN + 1` previews simultâneos) |
+| `PREVIEW_PORT` | `3031` | Porta em que o studio escuta dentro do container |
+| `PUBLIC_PREVIEW_URL` | `http://localhost:3031` | URL base retornada ao cliente como `preview_url` — deve ser a URL pública acessível pelo browser |
+
+**Exemplo para produção no Coolify/VPS:**
+
+```
+PREVIEW_PORT=3031
+PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
+```
+
+A porta `3031` (ou o valor de `PREVIEW_PORT`) deve estar exposta no `docker-compose.yaml` e aberta no firewall.
 
 ---
 
 ## Notas
 
-- O `preview_url` termina com `/` — necessário para o studio carregar sub-recursos corretamente
-- O processo `hyperframes preview` tem **30 segundos** para iniciar; se não responder, a requisição retorna 500
-- Previews são encerrados via **SIGTERM** — o processo tem chance de limpar estado antes de morrer
-- **Limite de concorrência:** 100 previews simultâneos por padrão. Ajuste `PREVIEW_PORT_MIN`/`PREVIEW_PORT_MAX` no ambiente para ampliar
+- **1 preview por vez:** qualquer chamada a `POST /preview` encerra o anterior — não há concorrência
+- **Porta real pode diferir:** se `PREVIEW_PORT` estiver ocupada, o `hyperframes preview` escolhe outra porta; o servidor parseia a porta real do stdout e reconstrói `preview_url` automaticamente
+- **`--kill-all`:** antes de cada preview, o servidor executa `hyperframes preview --kill-all` para limpar studios zumbis que o processo pai não conseguiu encerrar
+- **TTL:** o processo é encerrado via SIGTERM após 2 horas; use `DELETE` para encerrar antes
 - Uso típico: visualizar e ajustar a composição antes de chamar `POST /render` para gerar o MP4 final
