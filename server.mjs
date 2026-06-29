@@ -46,7 +46,8 @@ function spawnPreview(dir, port) {
 
     const onChunk = (chunk) => {
       const text = chunk.toString();
-      if (text.includes('running at') || text.includes(`localhost:${port}`) || text.includes('Studio')) {
+      process.stdout.write(`[preview] ${text}`); // log para diagnóstico
+      if (text.includes('Studio running') || text.includes(`localhost:${port}`)) {
         clearTimeout(readyTimeout);
         resolve(proc);
       }
@@ -174,10 +175,6 @@ app.post(
     for (const asset of assets) {
       await writeFile(join(previewDir, asset.filename), Buffer.from(asset.base64, 'base64'));
     }
-
-    // Estrutura mínima de projeto necessária para o hyperframes preview reconhecer o diretório
-    await writeFile(join(previewDir, 'hyperframes.json'), JSON.stringify({ version: '1' }), 'utf8');
-    await writeFile(join(previewDir, 'meta.json'), JSON.stringify({ name: previewId, duration: 10 }), 'utf8');
 
     let proc;
     try {
