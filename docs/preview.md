@@ -25,11 +25,12 @@ Encerra o preview anterior (se houver), salva a composição no disco, spawna o 
 | Campo | Tipo | Obrigatório | Padrão | Descrição |
 |-------|------|-------------|--------|-----------|
 | `html` | `string` | Sim | — | Conteúdo do `index.html` da composição HyperFrames |
-| `assets` | `array` | Não | `[]` | Arquivos adicionais (áudio, imagens) em base64 |
-| `assets[].filename` | `string` | Sim* | — | Nome do arquivo, ex: `narration.mp3` |
-| `assets[].base64` | `string` | Sim* | — | Conteúdo do arquivo codificado em base64 |
+| `assets` | `array` | Não | `[]` | Arquivos adicionais (áudio, imagens) |
+| `assets[].filename` | `string` | Sim | — | Nome do arquivo, ex: `narration.mp3` |
+| `assets[].base64` | `string` | Sim** | — | Conteúdo do arquivo codificado em base64 |
+| `assets[].url` | `string` | Sim** | — | URL pública/assinada de um asset já hospedado (bucket/CDN) — o servidor baixa via `fetch` |
 
-*Obrigatório quando `assets` está presente.
+**Cada asset precisa de `base64` **ou** `url`** (um dos dois, não ambos). `url` evita o overhead de ~33% do base64 e o limite de tamanho do JSON body — preferível para arquivos grandes ou quando o asset já está hospedado externamente.
 
 #### Exemplo de body
 
@@ -39,7 +40,7 @@ Encerra o preview anterior (se houver), salva a composição no disco, spawna o 
 }
 ```
 
-#### Com assets
+#### Com assets em base64
 
 ```json
 {
@@ -48,6 +49,20 @@ Encerra o preview anterior (se houver), salva a composição no disco, spawna o 
     {
       "filename": "narration.mp3",
       "base64": "//uQxAAAAAAAAAAAAAAAAAAAAAAA..."
+    }
+  ]
+}
+```
+
+#### Com assets por URL
+
+```json
+{
+  "html": "<div data-width=\"1920\" data-height=\"1080\"><img src=\"logo.png\"/></div>",
+  "assets": [
+    {
+      "filename": "logo.png",
+      "url": "https://meu-bucket.com/logo.png"
     }
   ]
 }
@@ -70,6 +85,14 @@ Encerra o preview anterior (se houver), salva a composição no disco, spawna o 
 | `preview_id` | `string` | UUID do preview — use para encerrar via DELETE |
 | `preview_url` | `string` | URL pública do studio (valor de `PUBLIC_PREVIEW_URL`) |
 | `expires_in` | `string` | Tempo até o processo ser encerrado automaticamente |
+
+#### 400 Bad Request
+
+Retornado quando um asset não tem `base64` nem `url`, ou o download da `url` falha (HTTP não-2xx, DNS, timeout etc). Nenhum arquivo fica salvo em disco — o `previewDir` é limpo antes de responder.
+
+```json
+{ "error": "Falha ao baixar asset \"logo.png\" de https://meu-bucket.com/logo.png: HTTP 404" }
+```
 
 #### 500 Internal Server Error
 
@@ -149,7 +172,9 @@ POST /preview
   │     ├── SIGTERM no processo anterior (se houver)
   │     ├── rm /tmp/hf-previews/{previewId anterior}/
   │     └── executa: hyperframes preview --kill-all  (limpa registry interno)
-  ├── salva index.html + assets em /tmp/hf-previews/{previewId}/
+  ├── salva index.html em /tmp/hf-previews/{previewId}/
+  ├── salva cada asset (via base64 ou fetch(url)) em /tmp/hf-previews/{previewId}/
+  │     └── falha em qualquer asset → rm do dir + 400 (nenhum studio é spawnado)
   ├── spawnPreview(dir, PREVIEW_PORT)
   │     ├── executa: hyperframes preview --port 3031 --no-open --force-new
   │     ├── aguarda linha "Studio  http://localhost:XXXX" no stdout (timeout: 30s)

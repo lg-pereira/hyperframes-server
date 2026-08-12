@@ -60,6 +60,8 @@ curl -O http://localhost:3030/download/<job_id>
 
 ### Enviar assets (áudio, imagens)
 
+Cada asset aceita **`base64`** (conteúdo embutido) ou **`url`** (asset já hospedado em bucket/CDN externo — o servidor baixa via `fetch`). `url` evita o overhead de ~33% do base64 e o limite de tamanho do JSON body.
+
 ```bash
 curl -X POST http://localhost:3030/render \
   -H "Content-Type: application/json" \
@@ -74,6 +76,25 @@ curl -X POST http://localhost:3030/render \
     "fps": 30
   }'
 ```
+
+Ou, usando um asset já hospedado externamente:
+
+```bash
+curl -X POST http://localhost:3030/render \
+  -H "Content-Type: application/json" \
+  -d '{
+    "html": "<div data-width=\"1920\" data-height=\"1080\"><img src=\"logo.png\"/></div>",
+    "assets": [
+      {
+        "filename": "logo.png",
+        "url": "https://meu-bucket.com/logo.png"
+      }
+    ],
+    "fps": 30
+  }'
+```
+
+O mesmo vale para `POST /preview`.
 
 ## Documentação completa
 

@@ -13,12 +13,13 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 | Campo | Tipo | Obrigatório | Padrão | Descrição |
 |-------|------|-------------|--------|-----------|
 | `html` | `string` | Sim | — | Conteúdo completo do `index.html` da composição HyperFrames |
-| `assets` | `array` | Não | `[]` | Arquivos adicionais (áudio, imagens) codificados em base64 |
-| `assets[].filename` | `string` | Sim* | — | Nome do arquivo, ex: `narration.mp3`, `logo.png` |
-| `assets[].base64` | `string` | Sim* | — | Conteúdo do arquivo codificado em base64 |
+| `assets` | `array` | Não | `[]` | Arquivos adicionais (áudio, imagens) |
+| `assets[].filename` | `string` | Sim | — | Nome do arquivo, ex: `narration.mp3`, `logo.png` |
+| `assets[].base64` | `string` | Sim** | — | Conteúdo do arquivo codificado em base64 |
+| `assets[].url` | `string` | Sim** | — | URL pública/assinada de um asset já hospedado (bucket/CDN) — o servidor baixa via `fetch` |
 | `fps` | `integer` | Não | `30` | Frames por segundo do vídeo de saída |
 
-*Obrigatório quando `assets` está presente.
+**Cada asset precisa de `base64` **ou** `url`** (um dos dois, não ambos). `url` evita o overhead de ~33% do base64 e o limite de tamanho do JSON body — preferível para arquivos grandes ou quando o asset já está hospedado externamente.
 
 ### Exemplo de body (simples)
 
@@ -29,7 +30,7 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 }
 ```
 
-### Exemplo de body (com assets)
+### Exemplo de body (com assets em base64)
 
 ```json
 {
@@ -48,6 +49,27 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 }
 ```
 
+### Exemplo de body (com assets por URL)
+
+```json
+{
+  "html": "<div data-width=\"1920\" data-height=\"1080\"><audio src=\"narration.mp3\" data-duration=\"10\"/><img src=\"logo.png\"/></div>",
+  "assets": [
+    {
+      "filename": "narration.mp3",
+      "url": "https://meu-bucket.com/narration.mp3"
+    },
+    {
+      "filename": "logo.png",
+      "url": "https://meu-bucket.com/logo.png"
+    }
+  ],
+  "fps": 30
+}
+```
+
+Os dois formatos podem ser misturados no mesmo array — cada asset é resolvido independentemente.
+
 ## Response
 
 ### 202 Accepted
@@ -65,6 +87,14 @@ Job criado com sucesso. O processamento ocorre em background.
 |-------|------|-----------|
 | `job_id` | `string` | UUID único do job, usado para polling e download |
 | `status_url` | `string` | Caminho para verificar o status do job |
+
+### 400 Bad Request
+
+Retornado quando um asset não tem `base64` nem `url`, ou o download da `url` falha (HTTP não-2xx, DNS, timeout etc). Nenhum job é criado — o `jobDir` é limpo antes de responder.
+
+```json
+{ "error": "Falha ao baixar asset \"logo.png\" de https://meu-bucket.com/logo.png: HTTP 404" }
+```
 
 ## Exemplos cURL
 
@@ -96,6 +126,21 @@ curl -X POST http://localhost:3030/render \
   }"
 ```
 
+### Com asset por URL (bucket/CDN externo)
+
+```bash
+curl -X POST http://localhost:3030/render \
+  -H "Content-Type: application/json" \
+  -d '{
+    "html": "<div data-width=\"1920\" data-height=\"1080\"><img src=\"logo.png\"/></div>",
+    "assets": [{
+      "filename": "logo.png",
+      "url": "https://meu-bucket.com/logo.png"
+    }],
+    "fps": 30
+  }'
+```
+
 ### Extrair o job_id com jq
 
 ```bash
@@ -109,7 +154,8 @@ echo "Job ID: $JOB_ID"
 
 ## Como funciona internamente
 
-O servidor executa o binário local do HyperFrames em background:
+1. Cria `jobDir`, salva `index.html` e resolve cada asset (`base64` decodificado ou `fetch(url)`) em disco — falha em qualquer asset limpa o `jobDir` e responde `400` antes de iniciar o render.
+2. Executa o binário local do HyperFrames em background:
 
 ```
 hyperframes render <jobDir> -o <output.mp4> -f <fps> -w <workers> --no-browser-gpu
