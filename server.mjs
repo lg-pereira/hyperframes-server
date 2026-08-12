@@ -100,6 +100,23 @@ function spawnPreview(dir, port) {
 await mkdir(WORK_DIR, { recursive: true });
 await mkdir(PREVIEW_DIR, { recursive: true });
 
+// Grava um asset no disco a partir de base64 ou de uma URL remota (bucket/CDN externo).
+// URL evita o overhead de ~33% do base64 e o limite de tamanho do JSON body.
+async function saveAsset(dir, asset) {
+  const dest = join(dir, asset.filename);
+  if (asset.url) {
+    const res = await fetch(asset.url);
+    if (!res.ok) {
+      throw new Error(`Falha ao baixar asset "${asset.filename}" de ${asset.url}: HTTP ${res.status}`);
+    }
+    await writeFile(dest, Buffer.from(await res.arrayBuffer()));
+  } else if (asset.base64) {
+    await writeFile(dest, Buffer.from(asset.base64, 'base64'));
+  } else {
+    throw new Error(`Asset "${asset.filename}" precisa de "base64" ou "url"`);
+  }
+}
+
 const app = Fastify({
   logger: {
     level: 'info',
@@ -169,13 +186,16 @@ app.post(
           },
           assets: {
             type: 'array',
-            description: 'Arquivos adicionais (áudio, imagens) em base64',
+            description:
+              'Arquivos adicionais (áudio, imagens). Cada item aceita "base64" OU "url" ' +
+              '(asset já hospedado em bucket/CDN externo — evita o overhead do base64).',
             items: {
               type: 'object',
-              required: ['filename', 'base64'],
+              required: ['filename'],
               properties: {
                 filename: { type: 'string' },
-                base64: { type: 'string' },
+                base64: { type: 'string', description: 'Conteúdo do arquivo em base64' },
+                url: { type: 'string', description: 'URL pública/assinada de onde baixar o asset' },
               },
             },
           },
@@ -204,8 +224,13 @@ app.post(
     await mkdir(previewDir, { recursive: true });
 
     await writeFile(join(previewDir, 'index.html'), html, 'utf8');
-    for (const asset of assets) {
-      await writeFile(join(previewDir, asset.filename), Buffer.from(asset.base64, 'base64'));
+    try {
+      for (const asset of assets) {
+        await saveAsset(previewDir, asset);
+      }
+    } catch (err) {
+      await rm(previewDir, { recursive: true, force: true });
+      return reply.code(400).send({ error: err.message });
     }
 
     let proc, actualPort;
@@ -417,13 +442,16 @@ app.post(
           },
           assets: {
             type: 'array',
-            description: 'Arquivos adicionais (áudio, imagens) em base64',
+            description:
+              'Arquivos adicionais (áudio, imagens). Cada item aceita "base64" OU "url" ' +
+              '(asset já hospedado em bucket/CDN externo — evita o overhead do base64).',
             items: {
               type: 'object',
-              required: ['filename', 'base64'],
+              required: ['filename'],
               properties: {
                 filename: { type: 'string', description: 'Nome do arquivo, ex: narration.mp3' },
                 base64: { type: 'string', description: 'Conteúdo do arquivo em base64' },
+                url: { type: 'string', description: 'URL pública/assinada de onde baixar o asset' },
               },
             },
           },
@@ -455,9 +483,13 @@ app.post(
     await mkdir(outputDir, { recursive: true });
     await writeFile(join(jobDir, 'index.html'), html, 'utf8');
 
-    for (const asset of assets) {
-      const buf = Buffer.from(asset.base64, 'base64');
-      await writeFile(join(jobDir, asset.filename), buf);
+    try {
+      for (const asset of assets) {
+        await saveAsset(jobDir, asset);
+      }
+    } catch (err) {
+      await rm(jobDir, { recursive: true, force: true });
+      return reply.code(400).send({ error: err.message });
     }
 
     const outputFile = join(outputDir, 'video.mp4');
