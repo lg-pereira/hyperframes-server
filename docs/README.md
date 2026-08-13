@@ -22,6 +22,7 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 |--------|------|-----------|-----------|
 | `GET` | `/health` | Status do servidor | [health.md](./health.md) |
 | `POST` | `/lint` | Valida composição sem renderizar (síncrono) | [lint.md](./lint.md) |
+| `POST` | `/check` | Valida composição num browser real: runtime, layout, motion, contraste (síncrono) | [check.md](./check.md) |
 | `POST` | `/preview` | Inicia o studio de preview | [preview.md](./preview.md) |
 | `DELETE` | `/preview/:previewId` | Encerra o preview ativo | [preview.md](./preview.md) |
 | `POST` | `/render` | Submete composição HTML para renderização | [render.md](./render.md) |
@@ -39,6 +40,14 @@ POST /lint   → valid: true/false + lista de erros (< 1s)
 ```
 
 Use para validar a composição antes de qualquer outra chamada.
+
+### Check (validação em browser real)
+
+```
+POST /check   → valid: true/false + lista de erros agregada (até ~60s)
+```
+
+Roda lint + erros de console/runtime + layout + motion + contraste WCAG AA numa sessão real de Chromium, sem gerar vídeo. Use depois do `/lint` e antes do `/render` para pegar problemas que só aparecem em runtime (layout quebrado, contraste ruim, elementos fora do frame).
 
 ### Preview (studio ao vivo)
 

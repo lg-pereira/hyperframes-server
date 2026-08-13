@@ -425,6 +425,175 @@ function parseTextLintOutput(raw) {
   return errors;
 }
 
+// ─── POST /check ──────────────────────────────────────────────────────────────
+// Lint + erros de runtime/console + layout (overflow/clipping/overlap) + assertions
+// de *.motion.json + contraste WCAG AA, tudo em uma única sessão de browser real.
+// Mais lento que /lint (abre Chromium), mas não gera vídeo. Resposta no mesmo
+// formato do /lint (valid/errors/error_count) para não exigir tratamento separado.
+app.post(
+  '/check',
+  {
+    schema: {
+      summary: 'Valida uma composição HyperFrames em um browser real',
+      description:
+        'Executa hyperframes check no HTML fornecido: lint + erros de console/runtime + ' +
+        'layout (overflow/clipping/overlap) + assertions de *.motion.json + contraste WCAG AA, ' +
+        'tudo em uma única sessão de browser. Síncrono — pode levar até ~60s. ' +
+        'Resposta no mesmo formato do /lint (valid/errors/error_count).',
+      body: {
+        type: 'object',
+        required: ['html'],
+        properties: {
+          html: {
+            type: 'string',
+            description: 'Conteúdo do index.html da composição HyperFrames',
+          },
+          assets: {
+            type: 'array',
+            description:
+              'Arquivos adicionais (áudio, imagens) necessários para o check avaliar layout/contraste ' +
+              'de verdade. Cada item aceita "base64" OU "url".',
+            items: {
+              type: 'object',
+              required: ['filename'],
+              properties: {
+                filename: { type: 'string' },
+                base64: { type: 'string', description: 'Conteúdo do arquivo em base64' },
+                url: { type: 'string', description: 'URL pública/assinada de onde baixar o asset' },
+              },
+            },
+          },
+          strict: {
+            type: 'boolean',
+            default: false,
+            description: 'Se true, também sai não-zero em warnings (--strict)',
+          },
+          samples: {
+            type: 'integer',
+            description: 'Nº de amostras no tempo da composição (padrão do CLI: 9)',
+          },
+          at: {
+            type: 'array',
+            items: { type: 'number' },
+            description: 'Timestamps explícitos (segundos) para amostrar, em vez da grade automática',
+          },
+          tolerance: {
+            type: 'number',
+            description: 'Overflow em pixels tolerado antes de reportar (padrão do CLI: 2)',
+          },
+          contrast: {
+            type: 'boolean',
+            default: true,
+            description: 'Se false, pula o passe de contraste WCAG AA (--no-contrast)',
+          },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            valid: { type: 'boolean' },
+            errors: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  rule: { type: 'string' },
+                  message: { type: 'string' },
+                  element: { type: 'string' },
+                },
+              },
+            },
+            error_count: { type: 'integer' },
+          },
+        },
+        400: { type: 'object', properties: { error: { type: 'string' } } },
+        500: { type: 'object', properties: { error: { type: 'string' } } },
+      },
+    },
+  },
+  async (req, reply) => {
+    const { html, assets = [], strict = false, samples, at, tolerance, contrast = true } = req.body;
+
+    const checkId = randomUUID();
+    const checkDir = join(WORK_DIR, `check-${checkId}`);
+
+    try {
+      await mkdir(checkDir, { recursive: true });
+      await writeFile(join(checkDir, 'index.html'), html, 'utf8');
+
+      try {
+        for (const asset of assets) {
+          await saveAsset(checkDir, asset);
+        }
+      } catch (err) {
+        return reply.code(400).send({ error: err.message });
+      }
+
+      const args = ['check', checkDir, '--json'];
+      if (strict) args.push('--strict');
+      if (samples != null) args.push('--samples', String(samples));
+      if (Array.isArray(at) && at.length) args.push('--at', at.join(','));
+      if (tolerance != null) args.push('--tolerance', String(tolerance));
+      if (contrast === false) args.push('--no-contrast');
+
+      const result = await new Promise((resolve) => {
+        execFile(
+          HF_BIN,
+          args,
+          { cwd: checkDir, timeout: 60_000, maxBuffer: 32 * 1024 * 1024 },
+          (err, stdout, stderr) => resolve({ err, stdout, stderr })
+        );
+      });
+
+      // Timeout ou falha de execução do próprio processo — não é resultado de negócio,
+      // é erro do servidor (a composição não chegou a ser avaliada por completo)
+      if (result.err && (result.err.killed || typeof result.err.code !== 'number')) {
+        const reason = result.err.killed
+          ? 'hyperframes check excedeu o tempo limite (60s)'
+          : (result.err.message || String(result.err));
+        return reply.code(500).send({ error: reason });
+      }
+
+      // Exit code não-zero aqui significa apenas "achou issues" (ok:false), não falha do
+      // servidor — igual ao /lint, hyperframes check --json ainda entrega JSON no stdout
+      if (!result.stdout) {
+        const raw = result.stderr || (result.err && result.err.message) || '';
+        const errors = parseTextLintOutput(raw);
+        return reply.send({ valid: errors.length === 0, errors, error_count: errors.length });
+      }
+
+      try {
+        const parsed = JSON.parse(result.stdout);
+        // hyperframes check agrega achados em 5 categorias (lint/runtime/layout/motion/contrast) —
+        // achata tudo num array só e normaliza pro mesmo formato do /lint
+        const findings = [
+          ...(parsed.lint?.findings || []),
+          ...(parsed.runtime?.findings || []),
+          ...(parsed.layout?.findings || []),
+          ...(parsed.motion?.findings || []),
+          ...(parsed.contrast?.findings || []),
+        ];
+        const errors = findings.map((f) => ({
+          rule: f.rule || f.code || 'unknown',
+          message: f.message || String(f),
+          element: f.element || f.selector || '',
+        }));
+        const valid = typeof parsed.ok === 'boolean' ? parsed.ok : !result.err;
+        return reply.send({ valid, errors, error_count: errors.length });
+      } catch {
+        // stdout não é JSON — versão do CLI sem --json ou saída inesperada
+        const raw = result.stdout + result.stderr;
+        const errors = parseTextLintOutput(raw);
+        return reply.send({ valid: errors.length === 0, errors, error_count: errors.length });
+      }
+    } finally {
+      // Sempre limpa o diretório temporário, em qualquer caminho de saída
+      await rm(checkDir, { recursive: true, force: true });
+    }
+  }
+);
+
 // ─── POST /render ─────────────────────────────────────────────────────────────
 app.post(
   '/render',
