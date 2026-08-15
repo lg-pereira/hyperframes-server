@@ -13,6 +13,9 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 | Campo | Tipo | Obrigatório | Padrão | Descrição |
 |-------|------|-------------|--------|-----------|
 | `html` | `string` | Sim | — | Conteúdo completo do `index.html` da composição HyperFrames |
+| `compositions` | `array` | Não | `[]` | Arquivos de sub-composição adicionais (padrão modular via `data-composition-src`) |
+| `compositions[].path` | `string` | Sim | — | Caminho relativo ao diretório do job, ex: `compositions/scene-1.html` |
+| `compositions[].content` | `string` | Sim | — | Conteúdo do arquivo (HTML com `<template>`, `<style>` e `<script>` da cena) |
 | `assets` | `array` | Não | `[]` | Arquivos adicionais (áudio, imagens) |
 | `assets[].filename` | `string` | Sim | — | Nome do arquivo, ex: `narration.mp3`, `logo.png` |
 | `assets[].base64` | `string` | Sim** | — | Conteúdo do arquivo codificado em base64 |
@@ -20,6 +23,8 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 | `fps` | `integer` | Não | `30` | Frames por segundo do vídeo de saída |
 
 **Cada asset precisa de `base64` **ou** `url`** (um dos dois, não ambos). `url` evita o overhead de ~33% do base64 e o limite de tamanho do JSON body — preferível para arquivos grandes ou quando o asset já está hospedado externamente.
+
+`compositions[].path` (e `assets[].filename`) são validados contra path traversal — não podem ser absolutos nem conter `..`. Uma tentativa é rejeitada com `400` antes de qualquer escrita em disco.
 
 ### Exemplo de body (simples)
 
@@ -70,6 +75,27 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 
 Os dois formatos podem ser misturados no mesmo array — cada asset é resolvido independentemente.
 
+### Exemplo de body (padrão modular, com `compositions`)
+
+`index.html` fica fino — só declara os slots via `data-composition-src` — e cada cena vira um arquivo próprio em `compositions/`. O runtime `hyperframes` resolve `data-composition-src` nativamente: clona o `<template>` do arquivo referenciado para dentro do slot e registra `window.__timelines["scene-N"]` como já faz hoje. O servidor só materializa os arquivos no disco antes de rodar o CLI — sem `compositions` no body, o comportamento é idêntico ao de um `index.html` monolítico.
+
+```json
+{
+  "html": "<div data-width=\"1920\" data-height=\"1080\" data-composition-id=\"root\"><div data-composition-src=\"compositions/scene-1.html\" data-composition-id=\"scene-1\" data-start=\"0\" data-duration=\"3\" class=\"clip\"></div><div data-composition-src=\"compositions/scene-2.html\" data-composition-id=\"scene-2\" data-start=\"3\" data-duration=\"3\" class=\"clip\"></div><script>window.__timelines = { root: { duration: 6 } };</script></div>",
+  "compositions": [
+    {
+      "path": "compositions/scene-1.html",
+      "content": "<template><div data-composition-id=\"scene-1\" data-width=\"1920\" data-height=\"1080\"><h1 class=\"clip\" data-duration=\"3\">Cena 1</h1></div></template><script>window.__timelines = window.__timelines || {}; window.__timelines['scene-1'] = { duration: 3 };</script>"
+    },
+    {
+      "path": "compositions/scene-2.html",
+      "content": "<template><div data-composition-id=\"scene-2\" data-width=\"1920\" data-height=\"1080\"><h1 class=\"clip\" data-duration=\"3\">Cena 2</h1></div></template><script>window.__timelines = window.__timelines || {}; window.__timelines['scene-2'] = { duration: 3 };</script>"
+    }
+  ],
+  "fps": 30
+}
+```
+
 ## Response
 
 ### 202 Accepted
@@ -90,10 +116,14 @@ Job criado com sucesso. O processamento ocorre em background.
 
 ### 400 Bad Request
 
-Retornado quando um asset não tem `base64` nem `url`, ou o download da `url` falha (HTTP não-2xx, DNS, timeout etc). Nenhum job é criado — o `jobDir` é limpo antes de responder.
+Retornado quando um asset não tem `base64` nem `url`, o download da `url` falha (HTTP não-2xx, DNS, timeout etc), ou algum `compositions[].path`/`assets[].filename` é inválido (absoluto ou contendo `..`). Nenhum job é criado — o `jobDir` é limpo antes de responder.
 
 ```json
 { "error": "Falha ao baixar asset \"logo.png\" de https://meu-bucket.com/logo.png: HTTP 404" }
+```
+
+```json
+{ "error": "Path inválido: \"../../etc/passwd\" (não pode ser absoluto nem conter \"..\")" }
 ```
 
 ## Exemplos cURL
@@ -154,7 +184,7 @@ echo "Job ID: $JOB_ID"
 
 ## Como funciona internamente
 
-1. Cria `jobDir`, salva `index.html` e resolve cada asset (`base64` decodificado ou `fetch(url)`) em disco — falha em qualquer asset limpa o `jobDir` e responde `400` antes de iniciar o render.
+1. Cria `jobDir`, salva `index.html`, materializa cada item de `compositions` (após validar o `path`) e resolve cada asset (`base64` decodificado ou `fetch(url)`) em disco — falha em qualquer composição ou asset limpa o `jobDir` e responde `400` antes de iniciar o render.
 2. Executa o binário local do HyperFrames em background:
 
 ```

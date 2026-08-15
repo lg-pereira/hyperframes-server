@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import { execFile } from 'node:child_process';
 import { writeFile, mkdir, rm, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -100,10 +100,20 @@ function spawnPreview(dir, port) {
 await mkdir(WORK_DIR, { recursive: true });
 await mkdir(PREVIEW_DIR, { recursive: true });
 
+// Rejeita paths absolutos ou que escapem do diretório de sessão via "..",
+// para impedir escrita fora do previewDir/jobDir (path traversal).
+function assertSafeRelativePath(path) {
+  if (!path || isAbsolute(path) || path.split(/[/\\]/).includes('..')) {
+    throw new Error(`Path inválido: "${path}" (não pode ser absoluto nem conter "..")`);
+  }
+}
+
 // Grava um asset no disco a partir de base64 ou de uma URL remota (bucket/CDN externo).
 // URL evita o overhead de ~33% do base64 e o limite de tamanho do JSON body.
 async function saveAsset(dir, asset) {
+  assertSafeRelativePath(asset.filename);
   const dest = join(dir, asset.filename);
+  await mkdir(dirname(dest), { recursive: true });
   if (asset.url) {
     const res = await fetch(asset.url);
     if (!res.ok) {
@@ -114,6 +124,18 @@ async function saveAsset(dir, asset) {
     await writeFile(dest, Buffer.from(asset.base64, 'base64'));
   } else {
     throw new Error(`Asset "${asset.filename}" precisa de "base64" ou "url"`);
+  }
+}
+
+// Grava o index.html da composição e, opcionalmente, arquivos de sub-composição
+// (compositions/scene-N.html, resolvidos pelo runtime hyperframes via data-composition-src).
+async function writeCompositionFiles(dir, html, compositions = []) {
+  await writeFile(join(dir, 'index.html'), html, 'utf8');
+  for (const composition of compositions) {
+    assertSafeRelativePath(composition.path);
+    const dest = join(dir, composition.path);
+    await mkdir(dirname(dest), { recursive: true });
+    await writeFile(dest, composition.content, 'utf8');
   }
 }
 
@@ -184,6 +206,28 @@ app.post(
             type: 'string',
             description: 'Conteúdo do index.html da composição HyperFrames',
           },
+          compositions: {
+            type: 'array',
+            description:
+              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
+              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
+              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
+              'os arquivos no diretório de sessão antes de rodar o CLI.',
+            items: {
+              type: 'object',
+              required: ['path', 'content'],
+              properties: {
+                path: {
+                  type: 'string',
+                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                },
+                content: {
+                  type: 'string',
+                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                },
+              },
+            },
+          },
           assets: {
             type: 'array',
             description:
@@ -214,7 +258,22 @@ app.post(
     },
   },
   async (req, reply) => {
-    const { html, assets = [] } = req.body;
+    const { html, compositions = [], assets = [] } = req.body;
+
+    // A Studio usa globalThis.crypto.randomUUID/crypto.subtle ao salvar edições, e o
+    // navegador só expõe essas APIs em secure context (HTTPS ou localhost). Se
+    // PUBLIC_PREVIEW_URL apontar pra HTTP fora de localhost, o save vai falhar na Studio
+    // mesmo com o preview funcionando — avisa no log sem bloquear a criação do preview.
+    if (PUBLIC_PREVIEW_URL.startsWith('http://')) {
+      const previewHost = new URL(PUBLIC_PREVIEW_URL).hostname;
+      if (previewHost !== 'localhost' && previewHost !== '127.0.0.1') {
+        app.log.warn(
+          { publicPreviewUrl: PUBLIC_PREVIEW_URL },
+          'PUBLIC_PREVIEW_URL não é HTTPS nem localhost — a Studio vai falhar ao salvar edições ' +
+          '(crypto.randomUUID/crypto.subtle indisponíveis fora de secure context). Configure HTTPS no Coolify.'
+        );
+      }
+    }
 
     // Encerra qualquer preview anterior e limpa o registry do hyperframes
     await killActivePreview();
@@ -223,8 +282,8 @@ app.post(
     const previewDir = join(PREVIEW_DIR, previewId);
     await mkdir(previewDir, { recursive: true });
 
-    await writeFile(join(previewDir, 'index.html'), html, 'utf8');
     try {
+      await writeCompositionFiles(previewDir, html, compositions);
       for (const asset of assets) {
         await saveAsset(previewDir, asset);
       }
@@ -609,6 +668,28 @@ app.post(
             type: 'string',
             description: 'Conteúdo do index.html da composição HyperFrames',
           },
+          compositions: {
+            type: 'array',
+            description:
+              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
+              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
+              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
+              'os arquivos no diretório de sessão antes de rodar o CLI.',
+            items: {
+              type: 'object',
+              required: ['path', 'content'],
+              properties: {
+                path: {
+                  type: 'string',
+                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                },
+                content: {
+                  type: 'string',
+                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                },
+              },
+            },
+          },
           assets: {
             type: 'array',
             description:
@@ -643,16 +724,16 @@ app.post(
     },
   },
   async (req, reply) => {
-    const { html, assets = [], fps = 30 } = req.body;
+    const { html, compositions = [], assets = [], fps = 30 } = req.body;
 
     const jobId = randomUUID();
     const jobDir = join(WORK_DIR, jobId);
     const outputDir = join(jobDir, 'output');
 
     await mkdir(outputDir, { recursive: true });
-    await writeFile(join(jobDir, 'index.html'), html, 'utf8');
 
     try {
+      await writeCompositionFiles(jobDir, html, compositions);
       for (const asset of assets) {
         await saveAsset(jobDir, asset);
       }

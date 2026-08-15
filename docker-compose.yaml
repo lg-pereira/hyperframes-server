@@ -23,10 +23,12 @@ services:
       - NODE_ENV=production
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-      # URL pública da porta do preview studio — DEVE ser o IP/domínio acessível
-      # pelo navegador do usuário (NÃO localhost). Sobrescreva no painel do Coolify.
-      # Ex: http://meu-vps.com:3031 ou http://<IP_DO_VPS>:3031
-      - PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL:-http://100.121.2.102:3031}
+      # URL pública da porta do preview studio — DEVE ser HTTPS ou localhost.
+      # A Studio usa globalThis.crypto.randomUUID/crypto.subtle ao salvar edições,
+      # e o navegador só expõe essas APIs em "secure context" (HTTPS ou localhost).
+      # Servir em http://<IP-ou-domínio> quebra o save de edições na Studio.
+      # Sobrescreva no painel do Coolify se o domínio mudar.
+      - PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL:-https://hf.consultorluizg.com.br}
       # A Studio do hyperframes faz bind em 127.0.0.1 por padrão; dentro do container
       # isso a torna inalcançável pelo port-mapping do Docker. 0.0.0.0 expõe em todas
       # as interfaces para que a porta 3031 publicada funcione.

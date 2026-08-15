@@ -82,6 +82,39 @@ http://<host>:3030/health
 
 Resposta esperada: `{"status":"ok","uptime":<number>}`
 
+## HTTPS obrigatório para edição na Studio
+
+A porta `3031` serve a Studio (preview embutido do hyperframes, exposto via `POST /preview`). Se ela for acessada em HTTP puro (fora de `localhost`), a edição de vídeos quebra com erros como:
+
+- `Couldn't save index.html / index2.html — your latest edits are NOT persisted...`
+- `Failed to save animated edit.`
+- `Cannot read properties of undefined (reading 'digest')`
+- `Couldn't save "Scene5 Stat Num": globalThis.crypto.randomUUID is not a function`
+
+### Causa raiz
+
+O bundle da Studio (`node_modules/hyperframes/dist/studio/index.js`) usa `globalThis.crypto.randomUUID()` (em `createStudioWriteToken()`, usado em todo save/mutação) e `globalThis.crypto.subtle.digest("SHA-256", ...)` (em `studioFileContentVersion()`, usado na checagem de concorrência otimista) sem fallback. Essas APIs só existem no navegador em **secure context** (HTTPS ou `localhost`) — fora disso, ficam `undefined` e todo save falha.
+
+Não dá para corrigir isso só editando este repo — o bundle não expõe fallback para esses call sites. **A correção é servir a porta 3031 via HTTPS.**
+
+### Passo a passo no Coolify
+
+1. No painel do Coolify, na mesma aplicação do `hyperframes-server`, adicione um novo domínio apontando para a porta **3031** do container (análogo ao domínio/porta já configurado para a `3030`).
+2. Configure o DNS do domínio escolhido (A/AAAA ou CNAME) para o IP do VPS, se ainda não estiver apontado.
+3. No Coolify, habilite **Let's Encrypt / HTTPS automático** para esse domínio — o Coolify provisiona e renova o certificado sozinho via Traefik.
+4. Confirme que o Traefik está roteando `https://<domínio>` → porta interna `3031` do container (sem exigir porta na URL pública; o TLS termina em 443).
+5. Atualize a variável de ambiente `PUBLIC_PREVIEW_URL` no Coolify para o domínio HTTPS definitivo, por exemplo:
+   ```
+   PUBLIC_PREVIEW_URL=https://hf.consultorluizg.com.br
+   ```
+6. Faça o redeploy do serviço para a env var entrar em vigor.
+
+### Verificação
+
+1. Abrir a Studio pela URL retornada por `POST /preview`, editar um elemento e confirmar que o save funciona.
+2. No console do navegador, confirmar que `window.crypto.randomUUID` e `window.crypto.subtle` estão definidos.
+3. Se `PUBLIC_PREVIEW_URL` ainda estiver em HTTP fora de `localhost`, o servidor loga um `warn` em cada `POST /preview` avisando da causa raiz — útil para diagnosticar sem precisar reproduzir o erro no navegador.
+
 ## Deploy manual (sem Docker)
 
 Se preferir rodar sem container:
