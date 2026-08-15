@@ -15,12 +15,41 @@ Use antes de chamar `/preview` ou `/render` para capturar erros de estrutura do 
 | Campo | Tipo | Obrigatório | Descrição |
 |-------|------|-------------|-----------|
 | `html` | `string` | Sim | Conteúdo do `index.html` da composição HyperFrames |
+| `compositions` | `array` | Não | Arquivos de sub-composição adicionais (padrão modular via `data-composition-src`) |
+| `compositions[].path` | `string` | Sim* | Caminho relativo ao diretório de sessão, ex: `compositions/scene-1.html` |
+| `compositions[].content` | `string` | Sim* | Conteúdo do arquivo (HTML com `<template>`, `<style>` e `<script>` da cena) |
+
+*Obrigatório apenas dentro de cada item de `compositions`, não no body como um todo.
+
+`compositions[].path` é validado contra path traversal — não pode ser absoluto nem conter `..`. Uma tentativa é rejeitada com `400` antes de qualquer escrita em disco.
 
 ```json
 {
   "html": "<div data-width=\"1920\" data-height=\"1080\"><h1 data-duration=\"3\">Olá!</h1></div>"
 }
 ```
+
+#### Com sub-composições (padrão modular)
+
+`index.html` fino + cada cena em `compositions/scene-N.html`, mesmo formato aceito por `/preview` e `/render`. O `hyperframes lint` recebe o **diretório** já com todos os arquivos materializados, então uma referência `data-composition-src` não é mais reportada como ausente:
+
+```json
+{
+  "html": "<div data-width=\"1920\" data-height=\"1080\" data-composition-id=\"root\"><div data-composition-src=\"compositions/scene-1.html\" data-composition-id=\"scene-1\" data-start=\"0\" data-duration=\"3\" class=\"clip\"></div><div data-composition-src=\"compositions/scene-2.html\" data-composition-id=\"scene-2\" data-start=\"3\" data-duration=\"3\" class=\"clip\"></div><script>window.__timelines = { root: { duration: 6 } };</script></div>",
+  "compositions": [
+    {
+      "path": "compositions/scene-1.html",
+      "content": "<template><div data-composition-id=\"scene-1\" data-width=\"1920\" data-height=\"1080\"><h1 class=\"clip\" data-duration=\"3\">Cena 1</h1></div></template><script>window.__timelines = window.__timelines || {}; window.__timelines['scene-1'] = { duration: 3 };</script>"
+    },
+    {
+      "path": "compositions/scene-2.html",
+      "content": "<template><div data-composition-id=\"scene-2\" data-width=\"1920\" data-height=\"1080\"><h1 class=\"clip\" data-duration=\"3\">Cena 2</h1></div></template><script>window.__timelines = window.__timelines || {}; window.__timelines['scene-2'] = { duration: 3 };</script>"
+    }
+  ]
+}
+```
+
+**Nota:** `/lint` **não aceita `assets`** — permanece assim de propósito, já que o lint valida só a estrutura do HTML, nunca abre browser nem precisa de mídia real (ver "Notas" abaixo). Use `/check` quando precisar validar com assets presentes.
 
 ## Response
 
@@ -66,6 +95,14 @@ Use antes de chamar `/preview` ou `/render` para capturar erros de estrutura do 
 | `errors[].element` | `string` | Elemento HTML onde o erro ocorre (pode ser vazio) |
 | `error_count` | `integer` | Total de erros encontrados |
 
+### 400 Bad Request — Path inválido
+
+Retornado quando algum `compositions[].path` é absoluto ou contém `..`. Nenhum arquivo fica salvo em disco.
+
+```json
+{ "error": "Path inválido: \"../../etc/passwd\" (não pode ser absoluto nem conter \"..\")" }
+```
+
 ## Como funciona
 
 O `/lint` é **síncrono**: bloqueia até o processo terminar e devolve o resultado direto na resposta — diferente do `/render`, que retorna imediatamente com um `job_id`.
@@ -76,7 +113,7 @@ Internamente executa:
 hyperframes lint <dir> --json
 ```
 
-O HTML é salvo em um diretório temporário e o lint recebe o **diretório** (não o arquivo). Tem dois modos de operação dependendo da versão do HyperFrames instalada:
+O HTML (e cada item de `compositions`, se houver) é salvo em um diretório temporário via o mesmo helper `writeCompositionFiles()` usado por `/preview` e `/render`, e o lint recebe o **diretório** (não o arquivo). Tem dois modos de operação dependendo da versão do HyperFrames instalada:
 
 | Modo | Quando | Comportamento |
 |------|--------|---------------|
@@ -143,5 +180,5 @@ echo "Render iniciado: $JOB_ID"
 
 - Timeout interno de **15 segundos**
 - Os arquivos temporários criados durante o lint são **sempre removidos** ao final, mesmo em caso de erro
-- Não valida assets (imagens, áudio) — apenas a estrutura do HTML
+- Aceita `compositions` (padrão modular via `data-composition-src`), mas **não aceita `assets`** — o lint valida só a estrutura do HTML, nunca abre browser nem precisa de mídia real presente em disco. Use `/check` quando precisar validar com assets
 - Use no início do pipeline, antes de `/preview` ou `/render`, para economizar tempo

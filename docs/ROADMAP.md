@@ -1,6 +1,6 @@
 # Roadmap
 
-Duas features candidatas para implementação futura. Cada seção documenta causa raiz / motivação, desenho proposto e passos de implementação com referências de arquivo, para que qualquer pessoa (ou uma sessão futura do Claude) possa pegar e executar sem precisar reinvestigar do zero.
+Histórico de features implementadas (e uma pendência de infra). Cada seção documenta causa raiz / motivação, desenho proposto e passos de implementação com referências de arquivo, para que qualquer pessoa (ou uma sessão futura do Claude) possa pegar e executar sem precisar reinvestigar do zero.
 
 ---
 
@@ -32,7 +32,7 @@ Não dá para corrigir só editando este repo — o bundle da Studio não expõe
 ### Passos de implementação
 
 1. **⏳ Infra (Coolify) — pendente, requer acesso ao painel:** configurar o domínio `hf.consultorluizg.com.br` com HTTPS (Let's Encrypt automático) apontando para a porta 3031 do container `hyperframes-server`, do mesmo jeito que já deve existir para a porta 3030 (API). Checklist completo em [docs/deploy.md § HTTPS obrigatório para edição na Studio](deploy.md#https-obrigatório-para-edição-na-studio).
-2. **✅ `docker-compose.yaml`:** default de `PUBLIC_PREVIEW_URL` ([linha 29](../docker-compose.yaml#L29)) trocado para `https://hf.consultorluizg.com.br`, e comentário (linhas 26-30) atualizado explicando que a URL precisa ser HTTPS/`localhost` — é requisito de *secure context* do navegador, não só "acessível".
+2. **✅ `docker-compose.yaml`:** default de `PUBLIC_PREVIEW_URL` ([linha 29](../docker-compose.yaml#L29)) trocado para `https://hf.consultorluizg.com.br`, e comentário (linhas 26-30) atualizado explicando que a URL precisa ser HTTPS/`localhost` — é requisito de _secure context_ do navegador, não só "acessível".
 3. **✅ `server.mjs` — warning em runtime:** em `POST /preview` ([server.mjs:216-231](../server.mjs#L216-L231)), loga `app.log.warn` quando `PUBLIC_PREVIEW_URL` começa com `http://` e o host não é `localhost`/`127.0.0.1`. Não bloqueia a criação do preview. Testado manualmente: warning dispara com host HTTP externo, não dispara com `localhost`.
 4. **✅ `docs/deploy.md`:** nova seção "HTTPS obrigatório para edição na Studio" com a causa raiz e o passo a passo no Coolify para expor a porta 3031 com domínio + TLS.
 
@@ -43,6 +43,7 @@ Não dá para corrigir só editando este repo — o bundle da Studio não expõe
 3. ⏳ Confirmar com o(s) usuário(s) que os 5 erros pararam de ocorrer em uso real.
 
 ### Esforço estimado
+
 Baixo (infra + ~15 linhas de código/doc). Código e docs já implementados; o que falta é só a config de TLS no Coolify (passo 1), fora do escopo deste repo.
 
 ---
@@ -54,6 +55,7 @@ Baixo (infra + ~15 linhas de código/doc). Código e docs já implementados; o q
 Implementado e testado em 2026-08-15. `POST /preview` e `POST /render` aceitam o campo opcional `compositions` (array de `{path, content}`), materializado no disco via `writeCompositionFiles()` antes de rodar o CLI. `saveAsset()` também ganhou `mkdir(recursive:true)` + validação de path traversal. Ver [server.mjs](../server.mjs) (`assertSafeRelativePath`, `writeCompositionFiles`, `saveAsset`), [docs/preview.md](preview.md) e [docs/render.md](render.md).
 
 Verificado manualmente (servidor local, sem Docker):
+
 - Payload só com `html` (sem `compositions`) em `/preview` e `/render` — comportamento idêntico ao anterior (só `index.html` escrito em disco).
 - Payload com `index.html` fino + `compositions/scene-1.html` + `compositions/scene-2.html` em `/preview` e `/render` — ambos os arquivos materializados em `compositions/` dentro do diretório de sessão; `hyperframes render` confirmou (via lint) que leu e processou os dois arquivos referenciados por `data-composition-src`.
 - Path malicioso (`../../etc/passwd`, `/etc/passwd`) em `compositions[].path` e em `assets[].filename` — rejeitado com `400` e mensagem clara, nada escrito fora do diretório de sessão, `/etc/passwd` confirmado intacto.
@@ -64,6 +66,7 @@ Verificado manualmente (servidor local, sem Docker):
 Hoje o `index.html` de uma composição monta tudo inline: root → N `<div data-composition-id="scene-N" class="clip">` como filhos diretos, cada um com seu `<script>` logo depois. Isso fica difícil de revisar/editar conforme a composição cresce.
 
 No padrão modular:
+
 - `index.html` fica fino: só declara os slots — um `<div data-composition-src="compositions/scene-1.html" data-composition-id="scene-1" data-start="..." data-duration="..." class="clip">` vazio por cena — e registra uma timeline raiz quase vazia.
 - Cada cena vira um arquivo próprio, `compositions/scene-N.html`, com um `<template>` contendo markup + `<style>` + `<script>` daquela cena.
 - O runtime do `hyperframes` já sabe resolver `data-composition-src` (comportamento documentado do CLI: sub-composições via `<template>` referenciadas por `data-composition-src`) — clona o conteúdo do `<template>` para dentro do slot e resolve `window.__timelines["scene-N"]` como já faz hoje.
@@ -84,12 +87,16 @@ Estender o schema de `POST /preview` ([server.mjs:171-215](../server.mjs#L171-L2
 {
   "html": "<!-- conteúdo de index.html -->",
   "compositions": [
-    { "path": "compositions/scene-1.html", "content": "<!-- <template>...</template> -->" },
+    {
+      "path": "compositions/scene-1.html",
+      "content": "<!-- <template>...</template> -->"
+    },
     { "path": "compositions/scene-2.html", "content": "..." }
   ],
-  "assets": [ { "filename": "...", "base64": "..." } ]
+  "assets": [{ "filename": "...", "base64": "..." }]
 }
 ```
+
 - `compositions` é opcional; se ausente, comportamento atual (arquivo único) não muda — **zero breaking change**.
 - Reusar o mesmo formato `{path/filename, content}` dos `assets`, mas como texto (não base64), já que são arquivos HTML.
 
@@ -118,4 +125,64 @@ Validar `path` de cada item em `compositions` (e `filename` de cada `asset`) con
 4. Testar `path` malicioso (`../../etc/passwd`) e confirmar que a rota rejeita com 400.
 
 ### Esforço estimado
+
 Médio (~1 dia): schema + helper de escrita + validação de path traversal + docs. A resolução de `data-composition-src` em si já é responsabilidade do `hyperframes` CLI/bundle — não precisa ser reimplementada.
+
+## 3. Estender `/check` e `/lint` pra aceitar `compositions[]` — ✅ concluído
+
+### Status
+
+Implementado e testado em 2026-08-15. `POST /check` e `POST /lint` aceitam o campo opcional `compositions` (array de `{path, content}`), materializado no disco via o helper `writeCompositionFiles()` já existente (reusado tal como estava, sem reimplementação). Ver [server.mjs](../server.mjs) (rotas `/lint` e `/check`), [docs/lint.md](lint.md) e [docs/check.md](check.md).
+
+**Decisão sobre `assets` em `/lint` (ponto 5 do desenho proposto):** optou-se por **não** adicionar `assets` a `/lint` — ficou só com `compositions`. Motivo: `/lint` já era documentado como validação puramente estrutural do HTML, sem abrir browser e sem tocar em mídia real (`docs/lint.md` já dizia "Não valida assets (imagens, áudio) — apenas a estrutura do HTML" antes desta mudança); `compositions` é necessário porque o `hyperframes lint` resolve `data-composition-src` contra o diretório, mas nenhuma regra de lint depende de um asset existir fisicamente em disco. `/check` continua sendo o endpoint indicado quando for preciso validar com assets presentes (layout/contraste).
+
+Verificado manualmente (servidor local, sem Docker):
+
+- Payload só com `html` (sem `compositions`) em `/check` e `/lint` — comportamento idêntico ao anterior (mesmos achados de baseline, nenhuma mudança de comportamento).
+- Payload com `index.html` fino + `compositions/scene-1.html` + `compositions/scene-2.html` em `/lint` — `valid: true`, sem erro de sub-composição ausente.
+- Mesmo payload em `/check` — nenhum erro de arquivo/sub-composição ausente; os achados retornados (`studio_missing_editable_id`, `root_composition_missing_data_start`, etc.) referenciam `scene-1` e `scene-2` diretamente, confirmando que o `hyperframes check` processou o conteúdo real das cenas, não só um root vazio.
+- Path malicioso (`../../etc/passwd`) em `compositions[].path` em `/lint` e `/check` — ambos rejeitados com `400` e a mensagem padrão de `assertSafeRelativePath()`; `/etc/passwd` confirmado intacto; nenhum diretório temporário deixado para trás (`/tmp/hf-jobs` limpo em ambos os casos, inclusive no caminho de erro).
+- **Não verificado neste ambiente:** o mesmo caveat do item 2 — ffmpeg/ffprobe não estão instalados na máquina de desenvolvimento local, mas `/check` e `/lint` não geram vídeo, então isso não bloqueia a verificação destes dois endpoints especificamente.
+
+### Motivação
+
+O item 2 deste roadmap adicionou suporte a `compositions[]` (sub-composições via `data-composition-src`) em `POST /preview` e `POST /render`, mas não em `POST /check` nem `POST /lint`. Isso significa que, hoje, não existe forma de validar uma composição modular (`index.html` fino + `compositions/scene-N.html`) antes de gastar um preview ou render real — qualquer tentativa de rodar `/check`/`/lint` contra um `index.html` que referencia `data-composition-src="compositions/scene-1.html"` vai falhar, porque o servidor nunca materializa esse arquivo no diretório temporário de check/lint.
+
+### Causa raiz (confirmada por leitura de código)
+
+- `POST /check` ([server.mjs:493-654](../server.mjs#L493-L654)) desestrutura `const { html, assets = [], strict = false, samples, at, tolerance, contrast = true } = req.body;` ([server.mjs:575](../server.mjs#L575)) — sem `compositions`. Escreve só `index.html` ([server.mjs:582](../server.mjs#L582)) + assets via `saveAsset()` — nunca chama `writeCompositionFiles()`.
+- `POST /lint` ([server.mjs:351-...](../server.mjs#L351)) desestrutura só `const { html } = req.body;` ([server.mjs:391](../server.mjs#L391)) — mesma lacuna, nem `assets` aceita.
+- O helper `writeCompositionFiles(dir, html, compositions)` ([server.mjs:132](../server.mjs#L132)) já existe e já é reusado por `/preview` e `/render` — é só chamá-lo nos outros dois handlers.
+
+### Desenho proposto
+
+Espelhar exatamente o que já foi feito em `/preview`/`/render` (item 2 deste roadmap):
+
+1. Adicionar `compositions` ao schema Fastify de `POST /check` e `POST /lint` — mesmo formato já usado nos outros dois (`array` de `{path, content}`, ambos `required`, com a mesma descrição/validação de path traversal).
+2. Trocar `await writeFile(join(checkDir, 'index.html'), html, 'utf8')` (`/check`, linha 582) por `await writeCompositionFiles(checkDir, html, compositions)`.
+3. Trocar `await writeFile(lintFile, html, 'utf8')` (`/lint`, linha 400) por `await writeCompositionFiles(lintDir, html, compositions)` — ajustar a assinatura já que hoje `/lint` calcula `lintFile` como um caminho específico; `writeCompositionFiles` espera o diretório, não o arquivo.
+4. `/check` já aceita e usa `assets` — só adicionar `compositions` ao destructure da linha 575 e ao schema `properties`.
+5. `/lint` **não aceita `assets` hoje** — decidir se vale adicionar `assets` também (pra lint conseguir referenciar mídia por nome sem erro, se o CLI reclamar de arquivo ausente) ou deixar `/lint` só com `compositions` por ora, já que hoje ele nunca precisou de assets pra validação puramente estrutural.
+6. Atualizar `docs/lint.md` e `docs/check.md` com o novo campo `compositions`, exemplo de payload modular (mesmo exemplo já usado em `docs/preview.md`/`docs/render.md`).
+
+### Segurança
+
+Reusar a mesma validação de path traversal que `writeCompositionFiles()`/`assertSafeRelativePath()` já fazem para `/preview`/`/render` — nenhuma validação nova precisa ser escrita, só reaproveitar o helper existente.
+
+### Passos de implementação
+
+1. `server.mjs`: editar rota `/check` (linhas ~493-654) — schema + destructure + chamada ao helper.
+2. `server.mjs`: editar rota `/lint` (linhas ~351-...) — schema + destructure + chamada ao helper (decidir sobre `assets`, ver ponto 5 acima).
+3. `docs/check.md` e `docs/lint.md`: documentar `compositions`, com o mesmo exemplo de payload modular usado em `docs/preview.md`.
+4. Deploy no VPS (mesmo processo do item 1/2 deste roadmap).
+
+### Verificação
+
+1. Payload só com `html` (sem `compositions`) em `/check` e `/lint` — comportamento idêntico ao atual (regressão zero).
+2. Payload com `index.html` fino + 2 `compositions/scene-N.html` em `/check` — confirmar que não retorna mais erro de arquivo/sub-composição ausente, e que os achados de lint/runtime/layout refletem o conteúdo real das cenas (não só do root vazio).
+3. Mesmo teste em `/lint`.
+4. Path malicioso (`../../etc/passwd`) em `compositions[].path` — confirmar rejeição com `400`, igual a `/preview`/`/render`.
+
+### Esforço estimado
+
+Baixo (~1-2h) — mudança mecânica, reusa 100% da infraestrutura (`writeCompositionFiles`, validação de path) já implementada e testada no item 2.

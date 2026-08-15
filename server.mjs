@@ -363,6 +363,28 @@ app.post(
             type: 'string',
             description: 'Conteúdo do index.html da composição HyperFrames',
           },
+          compositions: {
+            type: 'array',
+            description:
+              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
+              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
+              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
+              'os arquivos no diretório de sessão antes de rodar o CLI.',
+            items: {
+              type: 'object',
+              required: ['path', 'content'],
+              properties: {
+                path: {
+                  type: 'string',
+                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                },
+                content: {
+                  type: 'string',
+                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                },
+              },
+            },
+          },
         },
       },
       response: {
@@ -384,20 +406,24 @@ app.post(
             error_count: { type: 'integer' },
           },
         },
+        400: { type: 'object', properties: { error: { type: 'string' } } },
       },
     },
   },
   async (req, reply) => {
-    const { html } = req.body;
+    const { html, compositions = [] } = req.body;
 
-    // Arquivo temporário para o lint — não precisa de diretório de job completo
+    // Diretório temporário para o lint — não precisa de diretório de job completo
     const lintId = randomUUID();
     const lintDir = join(WORK_DIR, `lint-${lintId}`);
-    const lintFile = join(lintDir, 'index.html');
 
     try {
       await mkdir(lintDir, { recursive: true });
-      await writeFile(lintFile, html, 'utf8');
+      try {
+        await writeCompositionFiles(lintDir, html, compositions);
+      } catch (err) {
+        return reply.code(400).send({ error: err.message });
+      }
 
       const result = await new Promise((resolve) => {
         execFile(
@@ -447,7 +473,7 @@ app.post(
         });
       }
     } finally {
-      // Sempre limpa o arquivo temporário
+      // Sempre limpa o diretório temporário
       await rm(lintDir, { recursive: true, force: true });
     }
   }
@@ -506,6 +532,28 @@ app.post(
           html: {
             type: 'string',
             description: 'Conteúdo do index.html da composição HyperFrames',
+          },
+          compositions: {
+            type: 'array',
+            description:
+              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
+              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
+              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
+              'os arquivos no diretório de sessão antes de rodar o CLI.',
+            items: {
+              type: 'object',
+              required: ['path', 'content'],
+              properties: {
+                path: {
+                  type: 'string',
+                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                },
+                content: {
+                  type: 'string',
+                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                },
+              },
+            },
           },
           assets: {
             type: 'array',
@@ -572,16 +620,16 @@ app.post(
     },
   },
   async (req, reply) => {
-    const { html, assets = [], strict = false, samples, at, tolerance, contrast = true } = req.body;
+    const { html, compositions = [], assets = [], strict = false, samples, at, tolerance, contrast = true } = req.body;
 
     const checkId = randomUUID();
     const checkDir = join(WORK_DIR, `check-${checkId}`);
 
     try {
       await mkdir(checkDir, { recursive: true });
-      await writeFile(join(checkDir, 'index.html'), html, 'utf8');
 
       try {
+        await writeCompositionFiles(checkDir, html, compositions);
         for (const asset of assets) {
           await saveAsset(checkDir, asset);
         }

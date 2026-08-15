@@ -15,6 +15,9 @@ Use entre `/lint` (mais rápido, mas só olha a estrutura do HTML) e `/render` (
 | Campo | Tipo | Obrigatório | Descrição |
 |-------|------|-------------|-----------|
 | `html` | `string` | Sim | Conteúdo do `index.html` da composição HyperFrames |
+| `compositions` | `array` | Não | Arquivos de sub-composição adicionais (padrão modular via `data-composition-src`) |
+| `compositions[].path` | `string` | Sim* | Caminho relativo ao diretório de sessão, ex: `compositions/scene-1.html` |
+| `compositions[].content` | `string` | Sim* | Conteúdo do arquivo (HTML com `<template>`, `<style>` e `<script>` da cena) |
 | `assets` | `array` | Não | Arquivos adicionais (áudio, imagens). Cada item aceita `base64` OU `url`. Necessário para o check avaliar layout/contraste de verdade — diferente do `/lint`, que não precisa deles |
 | `strict` | `boolean` | Não | Se `true`, também falha (`valid: false`) em warnings, não só erros. Padrão: `false` |
 | `samples` | `integer` | Não | Nº de amostras no tempo da composição. Padrão do CLI: `9` |
@@ -22,9 +25,33 @@ Use entre `/lint` (mais rápido, mas só olha a estrutura do HTML) e `/render` (
 | `tolerance` | `number` | Não | Overflow em pixels tolerado antes de reportar. Padrão do CLI: `2` |
 | `contrast` | `boolean` | Não | Se `false`, pula o passe de contraste WCAG AA. Padrão: `true` |
 
+*Obrigatório apenas dentro de cada item de `compositions`, não no body como um todo.
+
+`compositions[].path` (e `assets[].filename`) são validados contra path traversal — não podem ser absolutos nem conter `..`. Uma tentativa é rejeitada com `400` antes de qualquer escrita em disco.
+
 ```json
 {
   "html": "<div data-composition-id=\"root\" data-width=\"1920\" data-height=\"1080\" data-start=\"0\" data-duration=\"3\"><h1 class=\"clip\" data-start=\"0\" data-duration=\"3\">Olá!</h1></div>"
+}
+```
+
+#### Com sub-composições (padrão modular)
+
+`index.html` fino + cada cena em `compositions/scene-N.html`, mesmo formato aceito por `/preview` e `/render`. O `hyperframes check` recebe o diretório já com todos os arquivos materializados, então os achados de lint/runtime/layout refletem o conteúdo real de cada cena (não só o root vazio):
+
+```json
+{
+  "html": "<div data-width=\"1920\" data-height=\"1080\" data-composition-id=\"root\"><div data-composition-src=\"compositions/scene-1.html\" data-composition-id=\"scene-1\" data-start=\"0\" data-duration=\"3\" class=\"clip\"></div><div data-composition-src=\"compositions/scene-2.html\" data-composition-id=\"scene-2\" data-start=\"3\" data-duration=\"3\" class=\"clip\"></div><script>window.__timelines = { root: { duration: 6 } };</script></div>",
+  "compositions": [
+    {
+      "path": "compositions/scene-1.html",
+      "content": "<template><div data-composition-id=\"scene-1\" data-width=\"1920\" data-height=\"1080\"><h1 class=\"clip\" data-duration=\"3\">Cena 1</h1></div></template><script>window.__timelines = window.__timelines || {}; window.__timelines['scene-1'] = { duration: 3 };</script>"
+    },
+    {
+      "path": "compositions/scene-2.html",
+      "content": "<template><div data-composition-id=\"scene-2\" data-width=\"1920\" data-height=\"1080\"><h1 class=\"clip\" data-duration=\"3\">Cena 2</h1></div></template><script>window.__timelines = window.__timelines || {}; window.__timelines['scene-2'] = { duration: 3 };</script>"
+    }
+  ]
 }
 ```
 
@@ -74,10 +101,16 @@ A resposta usa **o mesmo formato do `/lint`** — `{ valid, errors, error_count 
 | `errors[].element` | `string` | Seletor do elemento HTML onde o erro ocorre (pode ser vazio) |
 | `error_count` | `integer` | Total de erros encontrados |
 
-### 400 Bad Request — Asset inválido
+### 400 Bad Request — Asset ou path inválido
+
+Retornado quando um asset não tem `base64` nem `url`, o download da `url` falha, ou algum `compositions[].path`/`assets[].filename` é inválido (absoluto ou contendo `..`). Nenhum arquivo fica salvo em disco.
 
 ```json
 { "error": "Asset \"narration.mp3\" precisa de \"base64\" ou \"url\"" }
+```
+
+```json
+{ "error": "Path inválido: \"../../etc/passwd\" (não pode ser absoluto nem conter \"..\")" }
 ```
 
 ### 500 Internal Server Error — Timeout ou falha do próprio check
@@ -94,7 +127,7 @@ Internamente executa:
 hyperframes check <dir> --json [--strict] [--samples N] [--at t1,t2,...] [--tolerance N] [--no-contrast]
 ```
 
-O HTML e os assets são salvos num diretório temporário sob `/tmp/hf-jobs`, sempre removido ao final (sucesso ou erro). O `hyperframes check` entrega um JSON com achados separados em 5 categorias (`lint`, `runtime`, `layout`, `motion`, `contrast`); o servidor achata tudo num único array e normaliza para o mesmo formato `{ rule, message, element }` do `/lint`.
+O HTML, os itens de `compositions` (via o mesmo helper `writeCompositionFiles()` usado por `/preview` e `/render`) e os assets são salvos num diretório temporário sob `/tmp/hf-jobs`, sempre removido ao final (sucesso ou erro). O `hyperframes check` entrega um JSON com achados separados em 5 categorias (`lint`, `runtime`, `layout`, `motion`, `contrast`); o servidor achata tudo num único array e normaliza para o mesmo formato `{ rule, message, element }` do `/lint`.
 
 Assim como o `/lint`, exit code não-zero por achados do check **não é erro HTTP** — é resultado de negócio normal, respondido como `200` com `valid: false`. Só timeout (60s) ou falha de execução do processo em si vira `500`.
 
@@ -147,5 +180,6 @@ echo "Render iniciado: $JOB_ID"
 
 - Timeout interno de **60 segundos** (contra 15s do `/lint`, já que o `check` abre um browser real)
 - Os arquivos temporários criados durante o check são **sempre removidos** ao final, mesmo em caso de erro
+- Aceita `compositions` (padrão modular via `data-composition-src`), igual a `/preview` e `/render`
 - Diferente do `/lint`, o `/check` aceita `assets` — necessários para avaliar layout e contraste com mídia real presente
 - Se o lint interno do `check` falhar, o browser nem chega a abrir — a resposta ainda vem no mesmo formato, só que só com achados de lint
