@@ -66,6 +66,9 @@ RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
 USER pptruser
 
 EXPOSE 3030
+# Porta da Studio (preview embutido, POST /preview). Precisa estar declarada aqui para
+# o Coolify detectar/oferecer essa porta ao configurar domínio + HTTPS — ver docs/deploy.md.
+EXPOSE 3031
 
 # ── init=true no Compose resolve o PID 1 / processos zumbi do Chromium ───────
 CMD ["node", "server.mjs"]

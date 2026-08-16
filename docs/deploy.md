@@ -6,7 +6,7 @@ Como subir o HyperFrames Server em produção.
 
 O servidor requer Chromium e FFmpeg. Ambos estão incluídos no `Dockerfile` — não é necessário instalá-los manualmente ao usar Docker.
 
-**Porta exposta:** `3030`  
+**Portas expostas:** `3030` (API) e `3031` (Studio preview — exige HTTPS, ver [seção abaixo](#https-obrigatório-para-edição-na-studio))  
 **Variáveis de ambiente obrigatórias:** nenhuma
 
 ## Docker Compose (recomendado)
@@ -63,7 +63,7 @@ O servidor pode ser deployado diretamente pelo Dockerfile do repositório.
 
 1. No painel do Coolify, crie um novo **Resource → Dockerfile**
 2. Aponte para o repositório Git do projeto
-3. Defina a porta: `3030`
+3. Defina a porta: `3030` (para a porta `3031` da Studio, com domínio + HTTPS próprios, siga a seção [HTTPS obrigatório para edição na Studio](#https-obrigatório-para-edição-na-studio) — não é só repetir esse passo 3 com `3031`)
 4. Em **Environment Variables**, adicione:
    ```
    NODE_ENV=production
@@ -99,7 +99,8 @@ Não dá para corrigir isso só editando este repo — o bundle não expõe fall
 
 ### Passo a passo no Coolify
 
-1. No painel do Coolify, na mesma aplicação do `hyperframes-server`, adicione um novo domínio apontando para a porta **3031** do container (análogo ao domínio/porta já configurado para a `3030`).
+0. **Se o domínio já funciona na `3030` mas não na `3031`:** o recurso no Coolify provavelmente só "conhece" a porta `3030` (o `Dockerfile` só declarava `EXPOSE 3030` até esta correção — agora também declara `EXPOSE 3031`). Faça rebuild/redeploy do serviço primeiro, depois confira nas configurações gerais/rede do recurso se `3031` aparece na lista de portas do container; se não aparecer, adicione manualmente antes de seguir os passos abaixo.
+1. No painel do Coolify, na mesma aplicação do `hyperframes-server`, adicione um novo domínio apontando para a porta **3031** do container (análogo ao domínio/porta já configurado para a `3030`). Dependendo da versão do Coolify, isso pode exigir um subdomínio dedicado (ex: `studio.hf.consultorluizg.com.br`) em vez do mesmo domínio da `3030` — use o que a UI permitir para associar um domínio a uma porta específica do mesmo recurso.
 2. Configure o DNS do domínio escolhido (A/AAAA ou CNAME) para o IP do VPS, se ainda não estiver apontado.
 3. No Coolify, habilite **Let's Encrypt / HTTPS automático** para esse domínio — o Coolify provisiona e renova o certificado sozinho via Traefik.
 4. Confirme que o Traefik está roteando `https://<domínio>` → porta interna `3031` do container (sem exigir porta na URL pública; o TLS termina em 443).
@@ -108,6 +109,8 @@ Não dá para corrigir isso só editando este repo — o bundle não expõe fall
    PUBLIC_PREVIEW_URL=https://hf.consultorluizg.com.br
    ```
 6. Faça o redeploy do serviço para a env var entrar em vigor.
+
+**Fallback:** se a versão do Coolify não permitir associar uma segunda porta/domínio a um recurso do tipo `Dockerfile`, troque o tipo do recurso para **`Docker Compose`** apontando para o `docker-compose.yaml` deste repo — ele já expõe as duas portas (`3030` e `3031`) corretamente.
 
 ### Verificação
 
