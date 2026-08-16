@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   hyperframes-server:
@@ -11,13 +11,16 @@ services:
     # Resolve o problema de PID 1 e processos zumbi do Chromium
     init: true
 
+    expose:
+      - "3031"
+
     ports:
-      - '3030:3030'
-      - '3031:3031'
+      - "3030:3030"
+      - "3031:3031"
 
     # Memória compartilhada — obrigatório para o Chromium não crashar.
     # 4gb acomoda múltiplos Chromiums em paralelo (RENDER_WORKERS).
-    shm_size: '4gb'
+    shm_size: "4gb"
 
     environment:
       - NODE_ENV=production
@@ -45,7 +48,13 @@ services:
       - hf_previews:/tmp/hf-previews
 
     healthcheck:
-      test: ['CMD', 'node', '-e', "fetch('http://localhost:3030/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3030/health').then(r => r.ok ? process.exit(0) : process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

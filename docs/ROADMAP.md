@@ -144,6 +144,14 @@ Verificado manualmente (servidor local, sem Docker):
 - Path malicioso (`../../etc/passwd`) em `compositions[].path` em `/lint` e `/check` — ambos rejeitados com `400` e a mensagem padrão de `assertSafeRelativePath()`; `/etc/passwd` confirmado intacto; nenhum diretório temporário deixado para trás (`/tmp/hf-jobs` limpo em ambos os casos, inclusive no caminho de erro).
 - **Não verificado neste ambiente:** o mesmo caveat do item 2 — ffmpeg/ffprobe não estão instalados na máquina de desenvolvimento local, mas `/check` e `/lint` não geram vídeo, então isso não bloqueia a verificação destes dois endpoints especificamente.
 
+Deploy no VPS confirmado em 2026-08-15 (Coolify, redeploy manual — mesmo processo do item 1). Verificado contra produção (`http://100.121.2.102:3030`, Tailscale-only) após o redeploy:
+
+- `GET /health` respondeu com `uptime` baixo logo após o redeploy, confirmando container novo; `GET /docs/json` (Swagger) passou a listar `compositions` no schema de `/check` e `/lint` (antes só existia em `/preview`/`/render`).
+- Payload só com `html` (sem `compositions`) em `/check` e `/lint` — `/check` reportou os achados estruturais esperados do fragmento de teste (`missing_timeline_registry`, `studio_missing_editable_id`, etc.), `/lint` retornou `valid:true` — nenhum erro relacionado a arquivo/sub-composição ausente, comportamento consistente com o esperado sem `compositions`.
+- Payload com `index.html` fino + `compositions/scene-1.html` + `compositions/scene-2.html` em `/check` — achados (`studio_missing_editable_id`, `root_composition_missing_data_start`, etc.) referenciam `scene-1` e `scene-2` diretamente, confirmando que o servidor de produção materializou e processou o conteúdo real das duas cenas.
+- Mesmo payload em `/lint` — `valid:true`, sem erro de sub-composição ausente.
+- Path malicioso (`../../etc/passwd`) em `compositions[].path` — `/check` e `/lint` rejeitaram ambos com `400` e a mensagem padrão de `assertSafeRelativePath()`.
+
 ### Motivação
 
 O item 2 deste roadmap adicionou suporte a `compositions[]` (sub-composições via `data-composition-src`) em `POST /preview` e `POST /render`, mas não em `POST /check` nem `POST /lint`. Isso significa que, hoje, não existe forma de validar uma composição modular (`index.html` fino + `compositions/scene-N.html`) antes de gastar um preview ou render real — qualquer tentativa de rodar `/check`/`/lint` contra um `index.html` que referencia `data-composition-src="compositions/scene-1.html"` vai falhar, porque o servidor nunca materializa esse arquivo no diretório temporário de check/lint.
