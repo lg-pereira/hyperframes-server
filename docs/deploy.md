@@ -100,13 +100,13 @@ Não dá para corrigir isso só editando este repo — o bundle não expõe fall
 ### Passo a passo no Coolify
 
 0. **Se o domínio já funciona na `3030` mas não na `3031`:** o recurso no Coolify provavelmente só "conhece" a porta `3030` (o `Dockerfile` só declarava `EXPOSE 3030` até esta correção — agora também declara `EXPOSE 3031`). Faça rebuild/redeploy do serviço primeiro, depois confira nas configurações gerais/rede do recurso se `3031` aparece na lista de portas do container; se não aparecer, adicione manualmente antes de seguir os passos abaixo.
-1. No painel do Coolify, na mesma aplicação do `hyperframes-server`, adicione um novo domínio apontando para a porta **3031** do container (análogo ao domínio/porta já configurado para a `3030`). Dependendo da versão do Coolify, isso pode exigir um subdomínio dedicado (ex: `studio.hf.consultorluizg.com.br`) em vez do mesmo domínio da `3030` — use o que a UI permitir para associar um domínio a uma porta específica do mesmo recurso.
+1. No painel do Coolify, na mesma aplicação do `hyperframes-server`, adicione um novo domínio apontando para a porta **3031** do container (análogo ao domínio/porta já configurado para a `3030`). Dependendo da versão do Coolify, isso pode exigir um subdomínio dedicado (ex: `studio.<seu-domínio>`) em vez do mesmo domínio da `3030` — use o que a UI permitir para associar um domínio a uma porta específica do mesmo recurso.
 2. Configure o DNS do domínio escolhido (A/AAAA ou CNAME) para o IP do VPS, se ainda não estiver apontado.
 3. No Coolify, habilite **Let's Encrypt / HTTPS automático** para esse domínio — o Coolify provisiona e renova o certificado sozinho via Traefik.
 4. Confirme que o Traefik está roteando `https://<domínio>` → porta interna `3031` do container (sem exigir porta na URL pública; o TLS termina em 443).
-5. Atualize a variável de ambiente `PUBLIC_PREVIEW_URL` no Coolify para o domínio HTTPS definitivo, por exemplo:
+5. Defina a variável de ambiente `PUBLIC_PREVIEW_URL` **direto no painel do Coolify** (não há default no `docker-compose.yaml` — o domínio não deve ficar fixo no repositório), apontando para o domínio HTTPS definitivo, por exemplo:
    ```
-   PUBLIC_PREVIEW_URL=https://hf.consultorluizg.com.br
+   PUBLIC_PREVIEW_URL=https://<seu-domínio-https>
    ```
 6. Faça o redeploy do serviço para a env var entrar em vigor.
 

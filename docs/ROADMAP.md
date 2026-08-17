@@ -8,7 +8,7 @@ Histórico de features implementadas (e uma pendência de infra). Cada seção d
 
 ### Status
 
-Código e docs implementados (ver commits/diff em `docker-compose.yaml`, `server.mjs`, `docs/deploy.md`). Falta apenas o passo 1 (Coolify), que só pode ser executado por quem tem acesso ao painel. Domínio definido: `hf.consultorluizg.com.br`. Ver checklist em [docs/deploy.md § HTTPS obrigatório para edição na Studio](deploy.md#https-obrigatório-para-edição-na-studio).
+Código e docs implementados (ver commits/diff em `docker-compose.yaml`, `server.mjs`, `docs/deploy.md`). Falta o passo 1 (Coolify), que só pode ser executado por quem tem acesso ao painel — **pausado por enquanto** a pedido do usuário. O domínio não fica fixo no repositório: `PUBLIC_PREVIEW_URL` é definida direto como variável de ambiente no painel do Coolify (sem default no `docker-compose.yaml`). Ver checklist em [docs/deploy.md § HTTPS obrigatório para edição na Studio](deploy.md#https-obrigatório-para-edição-na-studio).
 
 ### Motivação
 
@@ -31,8 +31,8 @@ Não dá para corrigir só editando este repo — o bundle da Studio não expõe
 
 ### Passos de implementação
 
-1. **⏳ Infra (Coolify) — pendente, requer acesso ao painel:** configurar o domínio `hf.consultorluizg.com.br` com HTTPS (Let's Encrypt automático) apontando para a porta 3031 do container `hyperframes-server`, do mesmo jeito que já deve existir para a porta 3030 (API). Checklist completo em [docs/deploy.md § HTTPS obrigatório para edição na Studio](deploy.md#https-obrigatório-para-edição-na-studio).
-2. **✅ `docker-compose.yaml`:** default de `PUBLIC_PREVIEW_URL` ([linha 29](../docker-compose.yaml#L29)) trocado para `https://hf.consultorluizg.com.br`, e comentário (linhas 26-30) atualizado explicando que a URL precisa ser HTTPS/`localhost` — é requisito de _secure context_ do navegador, não só "acessível".
+1. **⏳ Infra (Coolify) — pendente/pausado, requer acesso ao painel:** configurar um domínio com HTTPS (Let's Encrypt automático) apontando para a porta 3031 do container `hyperframes-server`, do mesmo jeito que já deve existir para a porta 3030 (API). O domínio em si é decisão de infra, definido direto no Coolify — não fica hardcoded no repo. Checklist completo em [docs/deploy.md § HTTPS obrigatório para edição na Studio](deploy.md#https-obrigatório-para-edição-na-studio).
+2. **✅ `docker-compose.yaml`:** `PUBLIC_PREVIEW_URL` ([linha 34](../docker-compose.yaml#L34)) não tem mais default — `PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL}`, definida só via env var no Coolify, sem domínio fixo no repositório. Comentário (linhas 29-33) explica que a URL precisa ser HTTPS/`localhost` — é requisito de _secure context_ do navegador, não só "acessível".
 3. **✅ `server.mjs` — warning em runtime:** em `POST /preview` ([server.mjs:216-231](../server.mjs#L216-L231)), loga `app.log.warn` quando `PUBLIC_PREVIEW_URL` começa com `http://` e o host não é `localhost`/`127.0.0.1`. Não bloqueia a criação do preview. Testado manualmente: warning dispara com host HTTP externo, não dispara com `localhost`.
 4. **✅ `docs/deploy.md`:** nova seção "HTTPS obrigatório para edição na Studio" com a causa raiz e o passo a passo no Coolify para expor a porta 3031 com domínio + TLS.
 
