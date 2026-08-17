@@ -1,22 +1,24 @@
-import Fastify from 'fastify';
-import { execFile } from 'node:child_process';
-import { writeFile, mkdir, rm, readFile, stat } from 'node:fs/promises';
-import { join, dirname, isAbsolute } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { createReadStream, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import Fastify from "fastify";
+import { execFile } from "node:child_process";
+import { writeFile, mkdir, rm, readFile, stat } from "node:fs/promises";
+import { join, dirname, isAbsolute } from "node:path";
+import { randomUUID } from "node:crypto";
+import { createReadStream, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // Binário local do hyperframes — evita que o npx baixe o pacote a cada chamada
-const HF_BIN = fileURLToPath(new URL('./node_modules/.bin/hyperframes', import.meta.url));
+const HF_BIN = fileURLToPath(
+  new URL("./node_modules/.bin/hyperframes", import.meta.url),
+);
 const PORT = 3030;
-const HOST = '0.0.0.0';
-const WORK_DIR = '/tmp/hf-jobs';
-const PREVIEW_DIR = '/tmp/hf-previews';
+const HOST = "0.0.0.0";
+const WORK_DIR = "/tmp/hf-jobs";
+const PREVIEW_DIR = "/tmp/hf-previews";
 
 // Nº de workers do render. O `auto` do hyperframes calibra a frio e tende a escolher
 // 1 worker mesmo quando a captura em regime é rápida. Em ARM (modo screenshot) compensa
 // fixar conforme os cores disponíveis. Ajuste via env RENDER_WORKERS no Coolify.
-const RENDER_WORKERS = process.env.RENDER_WORKERS ?? 'auto';
+const RENDER_WORKERS = process.env.RENDER_WORKERS ?? "auto";
 
 // TTL dos previews em ms (padrão: 2 horas)
 const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
@@ -25,8 +27,10 @@ const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
 // Deve ser exposta no docker-compose e acessível de fora do container.
 // PUBLIC_PREVIEW_URL é a URL base pública para o browser acessar essa porta.
 // Ex: PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
-const PREVIEW_PORT = parseInt(process.env.PREVIEW_PORT ?? '3031');
-const PUBLIC_PREVIEW_URL = (process.env.PUBLIC_PREVIEW_URL ?? `http://localhost:${PREVIEW_PORT}`).replace(/\/$/, '');
+const PREVIEW_PORT = parseInt(process.env.PREVIEW_PORT ?? "3031");
+const PUBLIC_PREVIEW_URL = (
+  process.env.PUBLIC_PREVIEW_URL ?? `http://localhost:${PREVIEW_PORT}`
+).replace(/\/$/, "");
 
 // Apenas um preview ativo por vez
 let activePreview = null; // { proc, previewId, timer }
@@ -35,13 +39,20 @@ let activePreview = null; // { proc, previewId, timer }
 async function killActivePreview() {
   if (activePreview) {
     clearTimeout(activePreview.timer);
-    try { activePreview.proc.kill('SIGTERM'); } catch {}
-    rm(join(PREVIEW_DIR, activePreview.previewId), { recursive: true, force: true }).catch(() => {});
+    try {
+      activePreview.proc.kill("SIGTERM");
+    } catch {}
+    rm(join(PREVIEW_DIR, activePreview.previewId), {
+      recursive: true,
+      force: true,
+    }).catch(() => {});
     activePreview = null;
   }
   // Garante que o registry interno do hyperframes seja limpo antes do próximo preview
   await new Promise((resolve) => {
-    execFile(HF_BIN, ['preview', '--kill-all'], { timeout: 10_000 }, () => resolve());
+    execFile(HF_BIN, ["preview", "--kill-all"], { timeout: 10_000 }, () =>
+      resolve(),
+    );
   });
 }
 
@@ -51,14 +62,14 @@ function spawnPreview(dir, port) {
   return new Promise((resolve, reject) => {
     const proc = execFile(
       HF_BIN,
-      ['preview', '--port', String(port), '--no-open', '--force-new'],
-      { cwd: dir, timeout: 0 }
+      ["preview", "--port", String(port), "--no-open", "--force-new"],
+      { cwd: dir, timeout: 0 },
     );
 
-    const readyTimeout = setTimeout(
-      () => { proc.kill(); reject(new Error('hyperframes preview não iniciou em 30s')); },
-      30_000
-    );
+    const readyTimeout = setTimeout(() => {
+      proc.kill();
+      reject(new Error("hyperframes preview não iniciou em 30s"));
+    }, 30_000);
 
     let resolved = false;
     const onChunk = (chunk) => {
@@ -78,17 +89,20 @@ function spawnPreview(dir, port) {
 
       // Fallback: qualquer menção ao localhost com porta
       const fallback = text.match(/http:\/\/localhost:(\d+)/);
-      if (fallback && text.includes('Studio')) {
+      if (fallback && text.includes("Studio")) {
         resolved = true;
         clearTimeout(readyTimeout);
         resolve({ proc, actualPort: parseInt(fallback[1]) });
       }
     };
 
-    proc.stdout?.on('data', onChunk);
-    proc.stderr?.on('data', onChunk);
-    proc.on('error', (err) => { clearTimeout(readyTimeout); reject(err); });
-    proc.on('exit', (code) => {
+    proc.stdout?.on("data", onChunk);
+    proc.stderr?.on("data", onChunk);
+    proc.on("error", (err) => {
+      clearTimeout(readyTimeout);
+      reject(err);
+    });
+    proc.on("exit", (code) => {
       if (!resolved && code != null && code !== 0) {
         clearTimeout(readyTimeout);
         reject(new Error(`hyperframes preview saiu com código ${code}`));
@@ -103,8 +117,10 @@ await mkdir(PREVIEW_DIR, { recursive: true });
 // Rejeita paths absolutos ou que escapem do diretório de sessão via "..",
 // para impedir escrita fora do previewDir/jobDir (path traversal).
 function assertSafeRelativePath(path) {
-  if (!path || isAbsolute(path) || path.split(/[/\\]/).includes('..')) {
-    throw new Error(`Path inválido: "${path}" (não pode ser absoluto nem conter "..")`);
+  if (!path || isAbsolute(path) || path.split(/[/\\]/).includes("..")) {
+    throw new Error(
+      `Path inválido: "${path}" (não pode ser absoluto nem conter "..")`,
+    );
   }
 }
 
@@ -117,11 +133,13 @@ async function saveAsset(dir, asset) {
   if (asset.url) {
     const res = await fetch(asset.url);
     if (!res.ok) {
-      throw new Error(`Falha ao baixar asset "${asset.filename}" de ${asset.url}: HTTP ${res.status}`);
+      throw new Error(
+        `Falha ao baixar asset "${asset.filename}" de ${asset.url}: HTTP ${res.status}`,
+      );
     }
     await writeFile(dest, Buffer.from(await res.arrayBuffer()));
   } else if (asset.base64) {
-    await writeFile(dest, Buffer.from(asset.base64, 'base64'));
+    await writeFile(dest, Buffer.from(asset.base64, "base64"));
   } else {
     throw new Error(`Asset "${asset.filename}" precisa de "base64" ou "url"`);
   }
@@ -130,116 +148,124 @@ async function saveAsset(dir, asset) {
 // Grava o index.html da composição e, opcionalmente, arquivos de sub-composição
 // (compositions/scene-N.html, resolvidos pelo runtime hyperframes via data-composition-src).
 async function writeCompositionFiles(dir, html, compositions = []) {
-  await writeFile(join(dir, 'index.html'), html, 'utf8');
+  await writeFile(join(dir, "index.html"), html, "utf8");
   for (const composition of compositions) {
     assertSafeRelativePath(composition.path);
     const dest = join(dir, composition.path);
     await mkdir(dirname(dest), { recursive: true });
-    await writeFile(dest, composition.content, 'utf8');
+    await writeFile(dest, composition.content, "utf8");
   }
 }
 
 const app = Fastify({
   logger: {
-    level: 'info',
+    level: "info",
     transport: {
-      target: 'pino-pretty',
+      target: "pino-pretty",
       options: { colorize: true },
     },
   },
 });
 
 // ─── Swagger docs em /docs ───────────────────────────────────────────────────
-await app.register(import('@fastify/swagger'), {
+await app.register(import("@fastify/swagger"), {
   openapi: {
     info: {
-      title: 'HyperFrames Server',
-      description: 'API para renderização de vídeos com HyperFrames (Chromium + FFmpeg)',
-      version: '1.0.0',
+      title: "HyperFrames Server",
+      description:
+        "API para renderização de vídeos com HyperFrames (Chromium + FFmpeg)",
+      version: "1.0.0",
     },
   },
 });
 
-await app.register(import('@fastify/swagger-ui'), {
-  routePrefix: '/docs',
-  uiConfig: { docExpansion: 'full' },
-    theme: {
-    css: [{ filename: 'theme.css', content: '.topbar { display: none }' }],
+await app.register(import("@fastify/swagger-ui"), {
+  routePrefix: "/docs",
+  uiConfig: { docExpansion: "full" },
+  theme: {
+    css: [{ filename: "theme.css", content: ".topbar { display: none }" }],
   },
 });
 
-
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get(
-  '/health',
+  "/health",
   {
     schema: {
-      summary: 'Health check',
+      summary: "Health check",
       response: {
         200: {
-          type: 'object',
+          type: "object",
           properties: {
-            status: { type: 'string' },
-            uptime: { type: 'number' },
+            status: { type: "string" },
+            uptime: { type: "number" },
           },
         },
       },
     },
   },
-  async () => ({ status: 'ok', uptime: process.uptime() })
+  async () => ({ status: "ok", uptime: process.uptime() }),
 );
 
 // ─── POST /preview ────────────────────────────────────────────────────────────
 app.post(
-  '/preview',
+  "/preview",
   {
     schema: {
-      summary: 'Cria um preview ao vivo da composição',
+      summary: "Cria um preview ao vivo da composição",
       description:
-        'Salva o HTML e assets no disco, spawna `hyperframes preview` e retorna ' +
-        'a URL proxiada pelo servidor. O processo expira em 2 horas.',
+        "Salva o HTML e assets no disco, spawna `hyperframes preview` e retorna " +
+        "a URL proxiada pelo servidor. O processo expira em 2 horas.",
       body: {
-        type: 'object',
-        required: ['html'],
+        type: "object",
+        required: ["html"],
         properties: {
           html: {
-            type: 'string',
-            description: 'Conteúdo do index.html da composição HyperFrames',
+            type: "string",
+            description: "Conteúdo do index.html da composição HyperFrames",
           },
           compositions: {
-            type: 'array',
+            type: "array",
             description:
-              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
-              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
-              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
-              'os arquivos no diretório de sessão antes de rodar o CLI.',
+              "Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto " +
+              "com data-composition-src no index.html para dividir a composição em múltiplos arquivos. " +
+              "O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa " +
+              "os arquivos no diretório de sessão antes de rodar o CLI.",
             items: {
-              type: 'object',
-              required: ['path', 'content'],
+              type: "object",
+              required: ["path", "content"],
               properties: {
                 path: {
-                  type: 'string',
-                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                  type: "string",
+                  description:
+                    "Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html",
                 },
                 content: {
-                  type: 'string',
-                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                  type: "string",
+                  description:
+                    "Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)",
                 },
               },
             },
           },
           assets: {
-            type: 'array',
+            type: "array",
             description:
               'Arquivos adicionais (áudio, imagens). Cada item aceita "base64" OU "url" ' +
-              '(asset já hospedado em bucket/CDN externo — evita o overhead do base64).',
+              "(asset já hospedado em bucket/CDN externo — evita o overhead do base64).",
             items: {
-              type: 'object',
-              required: ['filename'],
+              type: "object",
+              required: ["filename"],
               properties: {
-                filename: { type: 'string' },
-                base64: { type: 'string', description: 'Conteúdo do arquivo em base64' },
-                url: { type: 'string', description: 'URL pública/assinada de onde baixar o asset' },
+                filename: { type: "string" },
+                base64: {
+                  type: "string",
+                  description: "Conteúdo do arquivo em base64",
+                },
+                url: {
+                  type: "string",
+                  description: "URL pública/assinada de onde baixar o asset",
+                },
               },
             },
           },
@@ -247,11 +273,11 @@ app.post(
       },
       response: {
         201: {
-          type: 'object',
+          type: "object",
           properties: {
-            preview_id: { type: 'string' },
-            preview_url: { type: 'string' },
-            expires_in: { type: 'string' },
+            preview_id: { type: "string" },
+            preview_url: { type: "string" },
+            expires_in: { type: "string" },
           },
         },
       },
@@ -264,13 +290,13 @@ app.post(
     // navegador só expõe essas APIs em secure context (HTTPS ou localhost). Se
     // PUBLIC_PREVIEW_URL apontar pra HTTP fora de localhost, o save vai falhar na Studio
     // mesmo com o preview funcionando — avisa no log sem bloquear a criação do preview.
-    if (PUBLIC_PREVIEW_URL.startsWith('http://')) {
+    if (PUBLIC_PREVIEW_URL.startsWith("http://")) {
       const previewHost = new URL(PUBLIC_PREVIEW_URL).hostname;
-      if (previewHost !== 'localhost' && previewHost !== '127.0.0.1') {
+      if (previewHost !== "localhost" && previewHost !== "127.0.0.1") {
         app.log.warn(
           { publicPreviewUrl: PUBLIC_PREVIEW_URL },
-          'PUBLIC_PREVIEW_URL não é HTTPS nem localhost — a Studio vai falhar ao salvar edições ' +
-          '(crypto.randomUUID/crypto.subtle indisponíveis fora de secure context). Configure HTTPS no Coolify.'
+          "PUBLIC_PREVIEW_URL não é HTTPS nem localhost — a Studio vai falhar ao salvar edições " +
+            "(crypto.randomUUID/crypto.subtle indisponíveis fora de secure context). Configure HTTPS no Coolify.",
         );
       }
     }
@@ -301,86 +327,89 @@ app.post(
     }
 
     // Reconstrói a URL pública usando a porta real (pode diferir de PREVIEW_PORT)
-    const basePublic = PUBLIC_PREVIEW_URL.replace(/:\d+$/, '');
-    const previewUrl = actualPort === PREVIEW_PORT
-      ? PUBLIC_PREVIEW_URL
-      : `${basePublic}:${actualPort}`;
+    const basePublic = PUBLIC_PREVIEW_URL.replace(/:\d+$/, "");
+    const previewUrl =
+      actualPort === PREVIEW_PORT
+        ? PUBLIC_PREVIEW_URL
+        : `${basePublic}:${actualPort}`;
 
     const timer = setTimeout(() => killActivePreview(), PREVIEW_TTL_MS);
     activePreview = { proc, previewId, timer };
 
-    app.log.info({ previewId, port: actualPort }, 'Preview started');
+    app.log.info({ previewId, port: actualPort }, "Preview started");
 
     reply.code(201).send({
       preview_id: previewId,
       preview_url: previewUrl,
-      expires_in: '2 horas',
+      expires_in: "2 horas",
     });
-  }
+  },
 );
 
 // ─── DELETE /preview/:previewId ───────────────────────────────────────────────
 app.delete(
-  '/preview/:previewId',
+  "/preview/:previewId",
   {
     schema: {
-      summary: 'Encerra o preview ativo',
+      summary: "Encerra o preview ativo",
       params: {
-        type: 'object',
-        properties: { previewId: { type: 'string' } },
+        type: "object",
+        properties: { previewId: { type: "string" } },
       },
       response: {
-        200: { type: 'object', properties: { deleted: { type: 'boolean' } } },
+        200: { type: "object", properties: { deleted: { type: "boolean" } } },
       },
     },
   },
   async (req, reply) => {
     if (!activePreview || activePreview.previewId !== req.params.previewId) {
-      return reply.code(404).send({ error: 'Preview não encontrado' });
+      return reply.code(404).send({ error: "Preview não encontrado" });
     }
     await killActivePreview();
-    app.log.info({ previewId: req.params.previewId }, 'Preview deleted');
+    app.log.info({ previewId: req.params.previewId }, "Preview deleted");
     return { deleted: true };
-  }
+  },
 );
 
 // ─── POST /lint ───────────────────────────────────────────────────────────────
 // Valida o HTML da composição sem renderizar. Síncrono e instantâneo.
 // Use antes do /preview ou /render para capturar erros do agente de IA.
 app.post(
-  '/lint',
+  "/lint",
   {
     schema: {
-      summary: 'Valida uma composição HyperFrames sem renderizar',
+      summary: "Valida uma composição HyperFrames sem renderizar",
       description:
-        'Executa hyperframes lint no HTML fornecido. Síncrono — responde em menos de 1s. ' +
-        'Retorna valid:true ou a lista de erros encontrados.',
+        "Executa hyperframes lint no HTML fornecido. Síncrono — responde em menos de 1s. " +
+        "Retorna valid:true ou a lista de erros encontrados.",
       body: {
-        type: 'object',
-        required: ['html'],
+        type: "object",
+        required: ["html"],
         properties: {
           html: {
-            type: 'string',
-            description: 'Conteúdo do index.html da composição HyperFrames',
+            type: "string",
+            description: "Conteúdo do index.html da composição HyperFrames",
           },
           compositions: {
-            type: 'array',
+            type: "array",
             description:
-              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
-              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
-              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
-              'os arquivos no diretório de sessão antes de rodar o CLI.',
+              "Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto " +
+              "com data-composition-src no index.html para dividir a composição em múltiplos arquivos. " +
+              "O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa " +
+              "os arquivos no diretório de sessão antes de rodar o CLI.",
             items: {
-              type: 'object',
-              required: ['path', 'content'],
+              type: "object",
+              required: ["path", "content"],
               properties: {
                 path: {
-                  type: 'string',
-                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                  type: "string",
+                  description:
+                    "Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html",
                 },
                 content: {
-                  type: 'string',
-                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                  type: "string",
+                  description:
+                    "Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)",
                 },
               },
             },
@@ -389,24 +418,24 @@ app.post(
       },
       response: {
         200: {
-          type: 'object',
+          type: "object",
           properties: {
-            valid: { type: 'boolean' },
+            valid: { type: "boolean" },
             errors: {
-              type: 'array',
+              type: "array",
               items: {
-                type: 'object',
+                type: "object",
                 properties: {
-                  rule: { type: 'string' },
-                  message: { type: 'string' },
-                  element: { type: 'string' },
+                  rule: { type: "string" },
+                  message: { type: "string" },
+                  element: { type: "string" },
                 },
               },
             },
-            error_count: { type: 'integer' },
+            error_count: { type: "integer" },
           },
         },
-        400: { type: 'object', properties: { error: { type: 'string' } } },
+        400: { type: "object", properties: { error: { type: "string" } } },
       },
     },
   },
@@ -428,11 +457,11 @@ app.post(
       const result = await new Promise((resolve) => {
         execFile(
           HF_BIN,
-          ['lint', lintDir, '--json'],
+          ["lint", lintDir, "--json"],
           { cwd: lintDir, timeout: 15_000 },
           (err, stdout, stderr) => {
             resolve({ err, stdout, stderr });
-          }
+          },
         );
       });
 
@@ -440,7 +469,7 @@ app.post(
       // Com --json retorna JSON estruturado no stdout
       if (!result.stdout && result.err) {
         // Lint não suporta --json ou erro inesperado — fallback para texto
-        const raw = result.stderr || result.err.message || '';
+        const raw = result.stderr || result.err.message || "";
         const errors = parseTextLintOutput(raw);
         return reply.send({
           valid: errors.length === 0,
@@ -453,9 +482,9 @@ app.post(
         const parsed = JSON.parse(result.stdout);
         // Normaliza para o formato da nossa resposta
         const errors = (parsed.errors || parsed.issues || []).map((e) => ({
-          rule: e.rule || e.code || 'unknown',
+          rule: e.rule || e.code || "unknown",
           message: e.message || String(e),
-          element: e.element || e.selector || '',
+          element: e.element || e.selector || "",
         }));
         return reply.send({
           valid: errors.length === 0,
@@ -476,7 +505,7 @@ app.post(
       // Sempre limpa o diretório temporário
       await rm(lintDir, { recursive: true, force: true });
     }
-  }
+  },
 );
 
 /**
@@ -487,24 +516,29 @@ function parseTextLintOutput(raw) {
   if (!raw || !raw.trim()) return [];
 
   const errors = [];
-  const lines = raw.split('\n').filter((l) => l.trim());
+  const lines = raw.split("\n").filter((l) => l.trim());
 
   for (const line of lines) {
     const lower = line.toLowerCase();
     // Ignora linhas de sucesso ou informativas
-    if (lower.includes('✓') || lower.includes('ok') || lower.includes('valid')) continue;
-    if (lower.includes('error') || lower.includes('warning') || lower.includes('✗')) {
+    if (lower.includes("✓") || lower.includes("ok") || lower.includes("valid"))
+      continue;
+    if (
+      lower.includes("error") ||
+      lower.includes("warning") ||
+      lower.includes("✗")
+    ) {
       errors.push({
-        rule: 'lint',
+        rule: "lint",
         message: line.trim(),
-        element: '',
+        element: "",
       });
     }
   }
 
   // Se nenhuma linha pareceu erro mas há conteúdo, trata tudo como erro
   if (errors.length === 0 && raw.trim()) {
-    errors.push({ rule: 'lint', message: raw.trim(), element: '' });
+    errors.push({ rule: "lint", message: raw.trim(), element: "" });
   }
 
   return errors;
@@ -516,111 +550,132 @@ function parseTextLintOutput(raw) {
 // Mais lento que /lint (abre Chromium), mas não gera vídeo. Resposta no mesmo
 // formato do /lint (valid/errors/error_count) para não exigir tratamento separado.
 app.post(
-  '/check',
+  "/check",
   {
     schema: {
-      summary: 'Valida uma composição HyperFrames em um browser real',
+      summary: "Valida uma composição HyperFrames em um browser real",
       description:
-        'Executa hyperframes check no HTML fornecido: lint + erros de console/runtime + ' +
-        'layout (overflow/clipping/overlap) + assertions de *.motion.json + contraste WCAG AA, ' +
-        'tudo em uma única sessão de browser. Síncrono — pode levar até ~60s. ' +
-        'Resposta no mesmo formato do /lint (valid/errors/error_count).',
+        "Executa hyperframes check no HTML fornecido: lint + erros de console/runtime + " +
+        "layout (overflow/clipping/overlap) + assertions de *.motion.json + contraste WCAG AA, " +
+        "tudo em uma única sessão de browser. Síncrono — pode levar até ~60s. " +
+        "Resposta no mesmo formato do /lint (valid/errors/error_count).",
       body: {
-        type: 'object',
-        required: ['html'],
+        type: "object",
+        required: ["html"],
         properties: {
           html: {
-            type: 'string',
-            description: 'Conteúdo do index.html da composição HyperFrames',
+            type: "string",
+            description: "Conteúdo do index.html da composição HyperFrames",
           },
           compositions: {
-            type: 'array',
+            type: "array",
             description:
-              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
-              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
-              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
-              'os arquivos no diretório de sessão antes de rodar o CLI.',
+              "Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto " +
+              "com data-composition-src no index.html para dividir a composição em múltiplos arquivos. " +
+              "O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa " +
+              "os arquivos no diretório de sessão antes de rodar o CLI.",
             items: {
-              type: 'object',
-              required: ['path', 'content'],
+              type: "object",
+              required: ["path", "content"],
               properties: {
                 path: {
-                  type: 'string',
-                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                  type: "string",
+                  description:
+                    "Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html",
                 },
                 content: {
-                  type: 'string',
-                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                  type: "string",
+                  description:
+                    "Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)",
                 },
               },
             },
           },
           assets: {
-            type: 'array',
+            type: "array",
             description:
-              'Arquivos adicionais (áudio, imagens) necessários para o check avaliar layout/contraste ' +
+              "Arquivos adicionais (áudio, imagens) necessários para o check avaliar layout/contraste " +
               'de verdade. Cada item aceita "base64" OU "url".',
             items: {
-              type: 'object',
-              required: ['filename'],
+              type: "object",
+              required: ["filename"],
               properties: {
-                filename: { type: 'string' },
-                base64: { type: 'string', description: 'Conteúdo do arquivo em base64' },
-                url: { type: 'string', description: 'URL pública/assinada de onde baixar o asset' },
+                filename: { type: "string" },
+                base64: {
+                  type: "string",
+                  description: "Conteúdo do arquivo em base64",
+                },
+                url: {
+                  type: "string",
+                  description: "URL pública/assinada de onde baixar o asset",
+                },
               },
             },
           },
           strict: {
-            type: 'boolean',
+            type: "boolean",
             default: false,
-            description: 'Se true, também sai não-zero em warnings (--strict)',
+            description: "Se true, também sai não-zero em warnings (--strict)",
           },
           samples: {
-            type: 'integer',
-            description: 'Nº de amostras no tempo da composição (padrão do CLI: 9)',
+            type: "integer",
+            description:
+              "Nº de amostras no tempo da composição (padrão do CLI: 9)",
           },
           at: {
-            type: 'array',
-            items: { type: 'number' },
-            description: 'Timestamps explícitos (segundos) para amostrar, em vez da grade automática',
+            type: "array",
+            items: { type: "number" },
+            description:
+              "Timestamps explícitos (segundos) para amostrar, em vez da grade automática",
           },
           tolerance: {
-            type: 'number',
-            description: 'Overflow em pixels tolerado antes de reportar (padrão do CLI: 2)',
+            type: "number",
+            description:
+              "Overflow em pixels tolerado antes de reportar (padrão do CLI: 2)",
           },
           contrast: {
-            type: 'boolean',
+            type: "boolean",
             default: true,
-            description: 'Se false, pula o passe de contraste WCAG AA (--no-contrast)',
+            description:
+              "Se false, pula o passe de contraste WCAG AA (--no-contrast)",
           },
         },
       },
       response: {
         200: {
-          type: 'object',
+          type: "object",
           properties: {
-            valid: { type: 'boolean' },
+            valid: { type: "boolean" },
             errors: {
-              type: 'array',
+              type: "array",
               items: {
-                type: 'object',
+                type: "object",
                 properties: {
-                  rule: { type: 'string' },
-                  message: { type: 'string' },
-                  element: { type: 'string' },
+                  rule: { type: "string" },
+                  message: { type: "string" },
+                  element: { type: "string" },
                 },
               },
             },
-            error_count: { type: 'integer' },
+            error_count: { type: "integer" },
           },
         },
-        400: { type: 'object', properties: { error: { type: 'string' } } },
-        500: { type: 'object', properties: { error: { type: 'string' } } },
+        400: { type: "object", properties: { error: { type: "string" } } },
+        500: { type: "object", properties: { error: { type: "string" } } },
       },
     },
   },
   async (req, reply) => {
-    const { html, compositions = [], assets = [], strict = false, samples, at, tolerance, contrast = true } = req.body;
+    const {
+      html,
+      compositions = [],
+      assets = [],
+      strict = false,
+      samples,
+      at,
+      tolerance,
+      contrast = true,
+    } = req.body;
 
     const checkId = randomUUID();
     const checkDir = join(WORK_DIR, `check-${checkId}`);
@@ -637,37 +692,44 @@ app.post(
         return reply.code(400).send({ error: err.message });
       }
 
-      const args = ['check', checkDir, '--json'];
-      if (strict) args.push('--strict');
-      if (samples != null) args.push('--samples', String(samples));
-      if (Array.isArray(at) && at.length) args.push('--at', at.join(','));
-      if (tolerance != null) args.push('--tolerance', String(tolerance));
-      if (contrast === false) args.push('--no-contrast');
+      const args = ["check", checkDir, "--json"];
+      if (strict) args.push("--strict");
+      if (samples != null) args.push("--samples", String(samples));
+      if (Array.isArray(at) && at.length) args.push("--at", at.join(","));
+      if (tolerance != null) args.push("--tolerance", String(tolerance));
+      if (contrast === false) args.push("--no-contrast");
 
       const result = await new Promise((resolve) => {
         execFile(
           HF_BIN,
           args,
           { cwd: checkDir, timeout: 60_000, maxBuffer: 32 * 1024 * 1024 },
-          (err, stdout, stderr) => resolve({ err, stdout, stderr })
+          (err, stdout, stderr) => resolve({ err, stdout, stderr }),
         );
       });
 
       // Timeout ou falha de execução do próprio processo — não é resultado de negócio,
       // é erro do servidor (a composição não chegou a ser avaliada por completo)
-      if (result.err && (result.err.killed || typeof result.err.code !== 'number')) {
+      if (
+        result.err &&
+        (result.err.killed || typeof result.err.code !== "number")
+      ) {
         const reason = result.err.killed
-          ? 'hyperframes check excedeu o tempo limite (60s)'
-          : (result.err.message || String(result.err));
+          ? "hyperframes check excedeu o tempo limite (60s)"
+          : result.err.message || String(result.err);
         return reply.code(500).send({ error: reason });
       }
 
       // Exit code não-zero aqui significa apenas "achou issues" (ok:false), não falha do
       // servidor — igual ao /lint, hyperframes check --json ainda entrega JSON no stdout
       if (!result.stdout) {
-        const raw = result.stderr || (result.err && result.err.message) || '';
+        const raw = result.stderr || (result.err && result.err.message) || "";
         const errors = parseTextLintOutput(raw);
-        return reply.send({ valid: errors.length === 0, errors, error_count: errors.length });
+        return reply.send({
+          valid: errors.length === 0,
+          errors,
+          error_count: errors.length,
+        });
       }
 
       try {
@@ -682,90 +744,105 @@ app.post(
           ...(parsed.contrast?.findings || []),
         ];
         const errors = findings.map((f) => ({
-          rule: f.rule || f.code || 'unknown',
+          rule: f.rule || f.code || "unknown",
           message: f.message || String(f),
-          element: f.element || f.selector || '',
+          element: f.element || f.selector || "",
         }));
-        const valid = typeof parsed.ok === 'boolean' ? parsed.ok : !result.err;
+        const valid = typeof parsed.ok === "boolean" ? parsed.ok : !result.err;
         return reply.send({ valid, errors, error_count: errors.length });
       } catch {
         // stdout não é JSON — versão do CLI sem --json ou saída inesperada
         const raw = result.stdout + result.stderr;
         const errors = parseTextLintOutput(raw);
-        return reply.send({ valid: errors.length === 0, errors, error_count: errors.length });
+        return reply.send({
+          valid: errors.length === 0,
+          errors,
+          error_count: errors.length,
+        });
       }
     } finally {
       // Sempre limpa o diretório temporário, em qualquer caminho de saída
       await rm(checkDir, { recursive: true, force: true });
     }
-  }
+  },
 );
 
 // ─── POST /render ─────────────────────────────────────────────────────────────
 app.post(
-  '/render',
+  "/render",
   {
     schema: {
-      summary: 'Envia uma composição HTML para renderização',
-      description: 'Inicia um job assíncrono. Retorna job_id para polling.',
+      summary: "Envia uma composição HTML para renderização",
+      description: "Inicia um job assíncrono. Retorna job_id para polling.",
       body: {
-        type: 'object',
-        required: ['html'],
+        type: "object",
+        required: ["html"],
         properties: {
           html: {
-            type: 'string',
-            description: 'Conteúdo do index.html da composição HyperFrames',
+            type: "string",
+            description: "Conteúdo do index.html da composição HyperFrames",
           },
           compositions: {
-            type: 'array',
+            type: "array",
             description:
-              'Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto ' +
-              'com data-composition-src no index.html para dividir a composição em múltiplos arquivos. ' +
-              'O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa ' +
-              'os arquivos no diretório de sessão antes de rodar o CLI.',
+              "Arquivos de sub-composição adicionais (ex: compositions/scene-1.html), usados junto " +
+              "com data-composition-src no index.html para dividir a composição em múltiplos arquivos. " +
+              "O runtime hyperframes resolve data-composition-src nativamente — o servidor só materializa " +
+              "os arquivos no diretório de sessão antes de rodar o CLI.",
             items: {
-              type: 'object',
-              required: ['path', 'content'],
+              type: "object",
+              required: ["path", "content"],
               properties: {
                 path: {
-                  type: 'string',
-                  description: 'Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html',
+                  type: "string",
+                  description:
+                    "Caminho relativo ao diretório de sessão, ex: compositions/scene-1.html",
                 },
                 content: {
-                  type: 'string',
-                  description: 'Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)',
+                  type: "string",
+                  description:
+                    "Conteúdo do arquivo (HTML com <template>, <style> e <script> da cena)",
                 },
               },
             },
           },
           assets: {
-            type: 'array',
+            type: "array",
             description:
               'Arquivos adicionais (áudio, imagens). Cada item aceita "base64" OU "url" ' +
-              '(asset já hospedado em bucket/CDN externo — evita o overhead do base64).',
+              "(asset já hospedado em bucket/CDN externo — evita o overhead do base64).",
             items: {
-              type: 'object',
-              required: ['filename'],
+              type: "object",
+              required: ["filename"],
               properties: {
-                filename: { type: 'string', description: 'Nome do arquivo, ex: narration.mp3' },
-                base64: { type: 'string', description: 'Conteúdo do arquivo em base64' },
-                url: { type: 'string', description: 'URL pública/assinada de onde baixar o asset' },
+                filename: {
+                  type: "string",
+                  description: "Nome do arquivo, ex: narration.mp3",
+                },
+                base64: {
+                  type: "string",
+                  description: "Conteúdo do arquivo em base64",
+                },
+                url: {
+                  type: "string",
+                  description: "URL pública/assinada de onde baixar o asset",
+                },
               },
             },
           },
           fps: {
-            type: 'integer',
+            type: "integer",
             default: 30,
-            description: 'Frames por segundo do vídeo de saída',
+            description: "Frames por segundo do vídeo de saída",
           },
         },
       },
       response: {
         202: {
-          type: 'object',
+          type: "object",
           properties: {
-            job_id: { type: 'string' },
-            status_url: { type: 'string' },
+            job_id: { type: "string" },
+            status_url: { type: "string" },
           },
         },
       },
@@ -776,7 +853,7 @@ app.post(
 
     const jobId = randomUUID();
     const jobDir = join(WORK_DIR, jobId);
-    const outputDir = join(jobDir, 'output');
+    const outputDir = join(jobDir, "output");
 
     await mkdir(outputDir, { recursive: true });
 
@@ -790,48 +867,64 @@ app.post(
       return reply.code(400).send({ error: err.message });
     }
 
-    const outputFile = join(outputDir, 'video.mp4');
+    const outputFile = join(outputDir, "video.mp4");
 
     // Acumula stdout/stderr do render para diagnóstico
-    let renderLog = '';
+    let renderLog = "";
 
     // Render em background — não bloqueia a resposta
     // CLI: hyperframes render [DIR] -o <output> -f <fps> -w <workers>
     const proc = execFile(
       HF_BIN,
-      ['render', jobDir,
-        '-o', outputFile,
-        '-f', String(fps),
-        '-w', String(RENDER_WORKERS),
-        '--no-browser-gpu',
+      [
+        "render",
+        jobDir,
+        "-o",
+        outputFile,
+        "-f",
+        String(fps),
+        "-w",
+        String(RENDER_WORKERS),
+        "--no-browser-gpu",
       ],
       { cwd: jobDir, timeout: 10 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 }, // timeout 10 min
       async (err) => {
         // Sempre persiste o log do render para diagnóstico
-        await writeFile(join(jobDir, 'render.log'), renderLog, 'utf8').catch(() => {});
+        await writeFile(join(jobDir, "render.log"), renderLog, "utf8").catch(
+          () => {},
+        );
 
         // Falha explícita do processo (exit != 0, timeout, etc.)
         if (err) {
-          app.log.error({ jobId, err: err.message }, 'Render failed');
-          await writeFile(join(jobDir, 'error.txt'), `${err.message}\n\n--- log ---\n${renderLog}`, 'utf8');
+          app.log.error({ jobId, err: err.message }, "Render failed");
+          await writeFile(
+            join(jobDir, "error.txt"),
+            `${err.message}\n\n--- log ---\n${renderLog}`,
+            "utf8",
+          );
           return;
         }
 
         // Exit 0 NÃO garante vídeo: valida que o arquivo existe e não está vazio
         let size = 0;
-        try { size = (await stat(outputFile)).size; } catch {}
+        try {
+          size = (await stat(outputFile)).size;
+        } catch {}
         if (size > 0) {
-          app.log.info({ jobId, size }, 'Render complete');
-          await writeFile(join(jobDir, 'done.txt'), 'ok', 'utf8');
+          app.log.info({ jobId, size }, "Render complete");
+          await writeFile(join(jobDir, "done.txt"), "ok", "utf8");
         } else {
-          app.log.error({ jobId }, 'Render terminou com exit 0 mas o vídeo está vazio/ausente');
+          app.log.error(
+            { jobId },
+            "Render terminou com exit 0 mas o vídeo está vazio/ausente",
+          );
           await writeFile(
-            join(jobDir, 'error.txt'),
+            join(jobDir, "error.txt"),
             `Render saiu com código 0 mas ${outputFile} ficou vazio ou ausente (${size} bytes).\n\n--- log ---\n${renderLog}`,
-            'utf8'
+            "utf8",
           );
         }
-      }
+      },
     );
 
     // Captura stdout/stderr do render para o log do job e para o console do container
@@ -840,39 +933,39 @@ app.post(
       renderLog += text;
       process.stdout.write(`[render ${jobId.slice(0, 8)}] ${text}`);
     };
-    proc.stdout?.on('data', onRenderChunk);
-    proc.stderr?.on('data', onRenderChunk);
+    proc.stdout?.on("data", onRenderChunk);
+    proc.stderr?.on("data", onRenderChunk);
 
     reply.code(202).send({
       job_id: jobId,
       status_url: `/status/${jobId}`,
     });
-  }
+  },
 );
 
 // ─── GET /status/:jobId ───────────────────────────────────────────────────────
 app.get(
-  '/status/:jobId',
+  "/status/:jobId",
   {
     schema: {
-      summary: 'Verifica o status de um job de renderização',
+      summary: "Verifica o status de um job de renderização",
       params: {
-        type: 'object',
-        properties: { jobId: { type: 'string' } },
+        type: "object",
+        properties: { jobId: { type: "string" } },
       },
       response: {
         200: {
-          type: 'object',
+          type: "object",
           properties: {
-            job_id: { type: 'string' },
-            status: { type: 'string', enum: ['processing', 'done', 'error'] },
-            download_url: { type: 'string' },
-            error: { type: 'string' },
+            job_id: { type: "string" },
+            status: { type: "string", enum: ["processing", "done", "error"] },
+            download_url: { type: "string" },
+            error: { type: "string" },
           },
         },
         404: {
-          type: 'object',
-          properties: { error: { type: 'string' } },
+          type: "object",
+          properties: { error: { type: "string" } },
         },
       },
     },
@@ -882,79 +975,100 @@ app.get(
     const jobDir = join(WORK_DIR, jobId);
 
     if (!existsSync(jobDir)) {
-      return reply.code(404).send({ error: 'Job não encontrado' });
+      return reply.code(404).send({ error: "Job não encontrado" });
     }
 
-    if (existsSync(join(jobDir, 'done.txt'))) {
-      return { job_id: jobId, status: 'done', download_url: `/download/${jobId}` };
+    if (existsSync(join(jobDir, "done.txt"))) {
+      return {
+        job_id: jobId,
+        status: "done",
+        download_url: `/download/${jobId}`,
+      };
     }
 
-    if (existsSync(join(jobDir, 'error.txt'))) {
-      const msg = await readFile(join(jobDir, 'error.txt'), 'utf8');
-      return { job_id: jobId, status: 'error', error: msg };
+    if (existsSync(join(jobDir, "error.txt"))) {
+      const msg = await readFile(join(jobDir, "error.txt"), "utf8");
+      return { job_id: jobId, status: "error", error: msg };
     }
 
-    return { job_id: jobId, status: 'processing' };
-  }
+    return { job_id: jobId, status: "processing" };
+  },
 );
 
 // ─── GET /download/:jobId ─────────────────────────────────────────────────────
 app.get(
-  '/download/:jobId',
+  "/download/:jobId",
   {
     schema: {
-      summary: 'Baixa o MP4 renderizado',
+      summary: "Baixa o MP4 renderizado",
       params: {
-        type: 'object',
-        properties: { jobId: { type: 'string' } },
+        type: "object",
+        properties: { jobId: { type: "string" } },
       },
     },
   },
   async (req, reply) => {
     const { jobId } = req.params;
-    const videoPath = join(WORK_DIR, jobId, 'output', 'video.mp4');
+    const videoPath = join(WORK_DIR, jobId, "output", "video.mp4");
 
     if (!existsSync(videoPath)) {
-      return reply.code(404).send({ error: 'Vídeo não encontrado ou ainda em processamento' });
+      return reply
+        .code(404)
+        .send({ error: "Vídeo não encontrado ou ainda em processamento" });
     }
 
     // Não serve arquivo vazio — sinaliza falha de render em vez de baixar 0 bytes
     const { size } = await stat(videoPath);
     if (size === 0) {
-      return reply.code(409).send({ error: 'Render produziu um vídeo vazio. Veja GET /logs/' + jobId });
+      return reply
+        .code(409)
+        .send({
+          error: "Render produziu um vídeo vazio. Veja GET /logs/" + jobId,
+        });
     }
 
-    reply.header('Content-Type', 'video/mp4');
-    reply.header('Content-Length', size);
-    reply.header('Content-Disposition', `attachment; filename="video-${jobId}.mp4"`);
+    reply.header("Content-Type", "video/mp4");
+    reply.header("Content-Length", size);
+    reply.header(
+      "Content-Disposition",
+      `attachment; filename="video-${jobId}.mp4"`,
+    );
 
     // Limpa o job 1 min após o início do download
-    setTimeout(() => rm(join(WORK_DIR, jobId), { recursive: true, force: true }), 60_000);
+    setTimeout(
+      () => rm(join(WORK_DIR, jobId), { recursive: true, force: true }),
+      60_000,
+    );
 
     // IMPORTANTE: em handler async, é preciso RETORNAR o stream/reply — senão o
     // Fastify resolve a promise com undefined e corta o corpo (download de 0 bytes).
     return reply.send(createReadStream(videoPath));
-  }
+  },
 );
 
 // ─── GET /logs/:jobId ─────────────────────────────────────────────────────────
 // Retorna o stdout/stderr capturado do hyperframes render, em texto puro.
 app.get(
-  '/logs/:jobId',
+  "/logs/:jobId",
   {
     schema: {
-      summary: 'Retorna o log do render (stdout/stderr) de um job',
-      params: { type: 'object', properties: { jobId: { type: 'string' } } },
+      summary: "Retorna o log do render (stdout/stderr) de um job",
+      params: { type: "object", properties: { jobId: { type: "string" } } },
     },
   },
   async (req, reply) => {
-    const logPath = join(WORK_DIR, req.params.jobId, 'render.log');
+    const logPath = join(WORK_DIR, req.params.jobId, "render.log");
     if (!existsSync(logPath)) {
-      return reply.code(404).send({ error: 'Log não encontrado (job inexistente ou ainda em processamento)' });
+      return reply
+        .code(404)
+        .send({
+          error:
+            "Log não encontrado (job inexistente ou ainda em processamento)",
+        });
     }
-    reply.header('Content-Type', 'text/plain; charset=utf-8');
-    return reply.send(await readFile(logPath, 'utf8'));
-  }
+    reply.header("Content-Type", "text/plain; charset=utf-8");
+    return reply.send(await readFile(logPath, "utf8"));
+  },
 );
 
 // ─── Start ────────────────────────────────────────────────────────────────────
