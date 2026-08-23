@@ -6,7 +6,7 @@ Como subir o HyperFrames Server em produção.
 
 O servidor requer Chromium e FFmpeg. Ambos estão incluídos no `Dockerfile` — não é necessário instalá-los manualmente ao usar Docker.
 
-**Portas expostas:** `3030` (API) e `3031` (Studio preview — exige HTTPS, ver [seção abaixo](#https-obrigatório-para-edição-na-studio))  
+**Portas expostas:** `3030` (API + Studio, é por onde salvar edições funciona) e `3031` (studio do hyperframes, acesso direto/diagnóstico — ver [seção abaixo](#edição-na-studio-salvar--como-funciona))  
 **Variáveis de ambiente obrigatórias:** nenhuma
 
 ## Docker Compose (recomendado)
@@ -63,13 +63,15 @@ O servidor pode ser deployado diretamente pelo Dockerfile do repositório.
 
 1. No painel do Coolify, crie um novo **Resource → Dockerfile**
 2. Aponte para o repositório Git do projeto
-3. Defina a porta: `3030` (para a porta `3031` da Studio, com domínio + HTTPS próprios, siga a seção [HTTPS obrigatório para edição na Studio](#https-obrigatório-para-edição-na-studio) — não é só repetir esse passo 3 com `3031`)
+3. Defina a porta: `3030` — ela serve a API **e** a Studio. Não é preciso expor a `3031` publicamente
 4. Em **Environment Variables**, adicione:
    ```
    NODE_ENV=production
    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+   PUBLIC_BASE_URL=http://<seu-host>:3030
    ```
+   `PUBLIC_BASE_URL` é o que faz a Studio ser entregue pela 3030 com o polyfill — ver [Edição na Studio](#edição-na-studio-salvar--como-funciona).
 5. Em **Advanced**, configure memória compartilhada (`/dev/shm`) para ao menos **2 GB** — isso é crítico para o Chromium funcionar corretamente
 6. Ative o health check apontando para `http://<host>:3030/health`
 7. Clique em **Deploy**
@@ -82,41 +84,71 @@ http://<host>:3030/health
 
 Resposta esperada: `{"status":"ok","uptime":<number>}`
 
-## HTTPS obrigatório para edição na Studio
+## Edição na Studio (salvar) — como funciona
 
-A porta `3031` serve a Studio (preview embutido do hyperframes, exposto via `POST /preview`). Se ela for acessada em HTTP puro (fora de `localhost`), a edição de vídeos quebra com erros como:
+A Studio é o preview embutido do hyperframes, exposto via `POST /preview`. Editar e **salvar** ali exige um detalhe de navegador que vale entender.
 
+### O problema
+
+O bundle da Studio (`node_modules/hyperframes/dist/studio/index.js`) usa duas APIs **sem fallback**:
+
+- `globalThis.crypto.randomUUID()` em `createStudioWriteToken()` — gera o header `X-Hyperframes-Write-Token` de **toda** mutação (save de HTML, edição animada, corte/split).
+- `globalThis.crypto.subtle.digest("SHA-256", ...)` em `studioFileContentVersion()` — checagem de concorrência otimista antes de cada save.
+
+Ambas são *secure-context only*: o navegador só as expõe em **HTTPS ou `localhost`**. Servindo em `http://<IP>:<porta>`, as duas ficam `undefined` e todo save quebra com erros como:
+
+- `Couldn't save "Scene5 Stat Num": globalThis.crypto.randomUUID is not a function`
+- `Cannot read properties of undefined (reading 'digest')`
 - `Couldn't save index.html / index2.html — your latest edits are NOT persisted...`
 - `Failed to save animated edit.`
-- `Cannot read properties of undefined (reading 'digest')`
-- `Couldn't save "Scene5 Stat Num": globalThis.crypto.randomUUID is not a function`
 
-### Causa raiz
+### A solução: a Studio é servida pela porta 3030
 
-O bundle da Studio (`node_modules/hyperframes/dist/studio/index.js`) usa `globalThis.crypto.randomUUID()` (em `createStudioWriteToken()`, usado em todo save/mutação) e `globalThis.crypto.subtle.digest("SHA-256", ...)` (em `studioFileContentVersion()`, usado na checagem de concorrência otimista) sem fallback. Essas APIs só existem no navegador em **secure context** (HTTPS ou `localhost`) — fora disso, ficam `undefined` e todo save falha.
+O servidor **proxia a Studio pela porta da API (3030)** e injeta [`studio-polyfill.js`](../studio-polyfill.js) no `<head>` do HTML dela, antes do bundle. O polyfill reimplementa `crypto.randomUUID` (UUID v4 sobre `crypto.getRandomValues`, que **não** é secure-context gated), `crypto.subtle.digest("SHA-256")` (em JS puro) e `navigator.clipboard.writeText`.
 
-Não dá para corrigir isso só editando este repo — o bundle não expõe fallback para esses call sites. **A correção é servir a porta 3031 via HTTPS.**
+Resultado: **salvar funciona em HTTP puro, sem nenhuma configuração de TLS.** Em HTTPS ou `localhost` o polyfill detecta as APIs nativas e vira no-op completo.
 
-### Passo a passo no Coolify
+O SHA-256 do polyfill é verificado contra `node:crypto` em `npm test` — se ele divergisse, a Studio calcularia uma versão de arquivo que não bate com a do servidor e todo save morreria em `409 conflict`.
 
-0. **Se o domínio já funciona na `3030` mas não na `3031`:** o recurso no Coolify provavelmente só "conhece" a porta `3030` (o `Dockerfile` só declarava `EXPOSE 3030` até esta correção — agora também declara `EXPOSE 3031`). Faça rebuild/redeploy do serviço primeiro, depois confira nas configurações gerais/rede do recurso se `3031` aparece na lista de portas do container; se não aparecer, adicione manualmente antes de seguir os passos abaixo.
-1. No painel do Coolify, na mesma aplicação do `hyperframes-server`, adicione um novo domínio apontando para a porta **3031** do container (análogo ao domínio/porta já configurado para a `3030`). Dependendo da versão do Coolify, isso pode exigir um subdomínio dedicado (ex: `studio.<seu-domínio>`) em vez do mesmo domínio da `3030` — use o que a UI permitir para associar um domínio a uma porta específica do mesmo recurso.
-2. Configure o DNS do domínio escolhido (A/AAAA ou CNAME) para o IP do VPS, se ainda não estiver apontado.
-3. No Coolify, habilite **Let's Encrypt / HTTPS automático** para esse domínio — o Coolify provisiona e renova o certificado sozinho via Traefik.
-4. Confirme que o Traefik está roteando `https://<domínio>` → porta interna `3031` do container (sem exigir porta na URL pública; o TLS termina em 443).
-5. Defina a variável de ambiente `PUBLIC_PREVIEW_URL` **direto no painel do Coolify** (não há default no `docker-compose.yaml` — o domínio não deve ficar fixo no repositório), apontando para o domínio HTTPS definitivo, por exemplo:
-   ```
-   PUBLIC_PREVIEW_URL=https://<seu-domínio-https>
-   ```
-6. Faça o redeploy do serviço para a env var entrar em vigor.
+### Configuração
 
-**Fallback:** se a versão do Coolify não permitir associar uma segunda porta/domínio a um recurso do tipo `Dockerfile`, troque o tipo do recurso para **`Docker Compose`** apontando para o `docker-compose.yaml` deste repo — ele já expõe as duas portas (`3030` e `3031`) corretamente.
+Defina `PUBLIC_BASE_URL` com a URL pública **da porta 3030**:
+
+```
+PUBLIC_BASE_URL=http://meu-vps.com:3030
+```
+
+A partir daí, `POST /preview` devolve `preview_url` já apontando para a Studio proxiada (com polyfill). O campo `preview_url_direct` continua trazendo a URL da 3031, para diagnóstico.
+
+**Enquanto `PUBLIC_BASE_URL` não estiver definida, nada muda:** `preview_url` continua sendo a URL da 3031 e o comportamento é idêntico ao de antes. A migração é opt-in, e o rollback é remover a variável.
+
+### Rollout recomendado
+
+1. Suba a versão nova **sem** `PUBLIC_BASE_URL`. O fluxo atual segue intacto; a Studio proxiada fica disponível em paralelo em `http://<host>:3030/` para você testar.
+2. Abra `http://<host>:3030/`, edite um elemento e confirme que o save funciona.
+3. Só então defina `PUBLIC_BASE_URL` e faça o redeploy, para que o `preview_url` migre.
+
+### Variáveis relacionadas
+
+| Variável | Padrão | Descrição |
+|----------|--------|-----------|
+| `PUBLIC_BASE_URL` | *(vazio)* | URL pública da porta 3030. Definida, faz `preview_url` apontar para a Studio proxiada (com polyfill) |
+| `STUDIO_PROXY` | `true` | `false` desliga o proxy e remove as rotas da Studio desta porta — rollback sem deploy de código |
+| `PREVIEW_RETENTION_MS` | `86400000` (24h) | Por quanto tempo os arquivos de um preview sobrevivem, para que `POST /render {preview_id}` possa renderizar as edições salvas |
+
+### E a porta 3031?
+
+Continua exposta e servindo o preview como sempre, **mas sem o polyfill** — salvar por ela em HTTP puro continua quebrando. Ela é útil para diagnóstico. Se um dia você parar de expor a 3031, troque `HYPERFRAMES_PREVIEW_HOST` de `0.0.0.0` para `127.0.0.1` no `docker-compose.yaml`.
+
+### HTTPS ainda vale a pena?
+
+Sim — deixa de ser **obrigatório**, mas continua sendo o ideal (o polyfill some do caminho e você ganha as APIs nativas do navegador). Se quiser configurar, no Coolify: adicione um domínio apontando para a porta **3030** do container, habilite Let's Encrypt, e defina `PUBLIC_BASE_URL=https://<seu-domínio>`. Não é preciso expor a 3031 publicamente.
 
 ### Verificação
 
-1. Abrir a Studio pela URL retornada por `POST /preview`, editar um elemento e confirmar que o save funciona.
-2. No console do navegador, confirmar que `window.crypto.randomUUID` e `window.crypto.subtle` estão definidos.
-3. Se `PUBLIC_PREVIEW_URL` ainda estiver em HTTP fora de `localhost`, o servidor loga um `warn` em cada `POST /preview` avisando da causa raiz — útil para diagnosticar sem precisar reproduzir o erro no navegador.
+1. Abrir a Studio pela URL de `preview_url`, editar um elemento e confirmar que o save funciona.
+2. No console do navegador: `crypto.randomUUID` e `crypto.subtle` devem estar **definidos** mesmo com `window.isSecureContext === false`.
+3. Nos logs, `POST /preview` avisa se a Studio estiver sendo entregue sem o proxy (ou seja, sem polyfill).
 
 ## Deploy manual (sem Docker)
 

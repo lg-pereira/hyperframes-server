@@ -23,9 +23,9 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 | `GET` | `/health` | Status do servidor | [health.md](./health.md) |
 | `POST` | `/lint` | Valida composição sem renderizar (síncrono) | [lint.md](./lint.md) |
 | `POST` | `/check` | Valida composição num browser real: runtime, layout, motion, contraste (síncrono) | [check.md](./check.md) |
-| `POST` | `/preview` | Inicia o studio de preview | [preview.md](./preview.md) |
+| `POST` | `/preview` | Inicia o studio de preview (editável, salva em disco) | [preview.md](./preview.md) |
 | `DELETE` | `/preview/:previewId` | Encerra o preview ativo | [preview.md](./preview.md) |
-| `POST` | `/render` | Submete composição HTML para renderização | [render.md](./render.md) |
+| `POST` | `/render` | Renderiza uma composição (`html`) ou as edições salvas na Studio (`preview_id`) | [render.md](./render.md) |
 | `GET` | `/status/:jobId` | Verifica status de um job | [status.md](./status.md) |
 | `GET` | `/download/:jobId` | Baixa o MP4 gerado | [download.md](./download.md) |
 | `GET` | `/logs/:jobId` | Log do processo render (diagnóstico) | [logs.md](./logs.md) |
@@ -49,14 +49,30 @@ POST /check   → valid: true/false + lista de erros agregada (até ~60s)
 
 Roda lint + erros de console/runtime + layout + motion + contraste WCAG AA numa sessão real de Chromium, sem gerar vídeo. Use depois do `/lint` e antes do `/render` para pegar problemas que só aparecem em runtime (layout quebrado, contraste ruim, elementos fora do frame).
 
-### Preview (studio ao vivo)
+### Preview (studio ao vivo, editável)
 
 ```
-POST /preview   → recebe preview_url (201 Created) — URL pública do studio
+POST /preview   → recebe preview_url + preview_id (201 Created)
 ```
 
 Abre diretamente no browser. **1 preview ativo por vez** — chamar novamente encerra o anterior.  
-Use para visualizar e ajustar a composição antes de renderizar.
+Use para visualizar, **editar e salvar** a composição antes de renderizar.
+
+A Studio é servida por esta mesma porta (via proxy), o que permite ao servidor injetar o polyfill de secure context que faz o **save** funcionar em HTTP puro — ver [deploy.md § Edição na Studio](./deploy.md#edição-na-studio-salvar--como-funciona).
+
+### Preview → editar → render
+
+O ciclo completo, sem reenviar HTML:
+
+```
+1. POST /preview                       → preview_url + preview_id
+         ↓
+2. abrir preview_url, editar e SALVAR na Studio
+         ↓
+3. POST /render {"preview_id": "..."}  → job_id
+         ↓
+4. GET /status/:job_id → GET /download/:job_id
+```
 
 ### Render (assíncrono)
 

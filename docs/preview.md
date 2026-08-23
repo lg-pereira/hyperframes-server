@@ -4,9 +4,12 @@ Endpoints para criar e encerrar previews ao vivo de composições HyperFrames.
 
 O preview spawna o `hyperframes preview` (o studio interativo) em uma **porta dedicada** e retorna a URL pública para abrir no browser. Diferente do `/render`, nenhum vídeo é gerado — o studio processa a composição em tempo real.
 
+A Studio é servida **por esta porta (3030)**, via proxy, para que o servidor consiga injetar o polyfill de secure context que faz **salvar edições** funcionar em HTTP puro — ver [deploy.md § Edição na Studio](./deploy.md#edição-na-studio-salvar--como-funciona). O que você salvar ali pode ser renderizado direto com [`POST /render` + `preview_id`](./render.md).
+
 **Apenas 1 preview ativo por vez.** Chamar `POST /preview` enquanto já existe um ativo encerra o anterior automaticamente.  
-**Porta:** `PREVIEW_PORT` (padrão: `3031`) — deve estar exposta no Docker/firewall.  
-**TTL:** o processo é encerrado automaticamente em **2 horas**.
+**Porta do studio:** `PREVIEW_PORT` (padrão: `3031`) — acesso direto/diagnóstico, **sem** o polyfill.  
+**TTL do processo:** encerrado automaticamente em **2 horas**.  
+**Retenção dos arquivos:** os arquivos do preview (incluindo o que a Studio salvou) sobrevivem por `PREVIEW_RETENTION_MS` (padrão **24 horas**), mesmo depois do processo morrer — é o que permite renderizar por `preview_id` mais tarde.
 
 ---
 
@@ -100,15 +103,17 @@ Encerra o preview anterior (se houver), salva a composição no disco, spawna o 
 ```json
 {
   "preview_id": "550e8400-e29b-41d4-a716-446655440000",
-  "preview_url": "http://meu-servidor.com:3031",
+  "preview_url": "http://meu-servidor.com:3030/",
+  "preview_url_direct": "http://meu-servidor.com:3031",
   "expires_in": "2 horas"
 }
 ```
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
-| `preview_id` | `string` | UUID do preview — use para encerrar via DELETE |
-| `preview_url` | `string` | URL pública do studio (valor de `PUBLIC_PREVIEW_URL`) |
+| `preview_id` | `string` | UUID do preview — use para encerrar via DELETE **e para renderizar as edições** via `POST /render` |
+| `preview_url` | `string` | **URL para abrir a Studio.** Com `PUBLIC_BASE_URL` definida, aponta para a Studio proxiada por esta porta, onde salvar edições funciona. Sem ela, cai no valor de `PUBLIC_PREVIEW_URL` (porta do studio, sem polyfill) |
+| `preview_url_direct` | `string` | URL da porta do studio (`PUBLIC_PREVIEW_URL`), para acesso direto/diagnóstico — **sem** o polyfill |
 | `expires_in` | `string` | Tempo até o processo ser encerrado automaticamente |
 
 #### 400 Bad Request
@@ -156,7 +161,7 @@ open "$URL"
 
 ## DELETE /preview/:previewId
 
-Encerra o studio, libera a porta e remove os arquivos do preview.
+Encerra o studio e libera a porta. Por padrão **mantém** os arquivos do preview em disco, para que `POST /render` com `preview_id` ainda consiga renderizar as edições salvas na Studio.
 
 ### Request
 
@@ -169,12 +174,18 @@ Encerra o studio, libera a porta e remove os arquivos do preview.
 |-----------|------|-----------|
 | `previewId` | `string` | UUID retornado pelo `POST /preview` |
 
+#### Query Parameters
+
+| Parâmetro | Tipo | Padrão | Descrição |
+|-----------|------|--------|-----------|
+| `purge` | `boolean` | `false` | Se `true`, apaga também os **arquivos** do preview. Por padrão eles são mantidos, para que `POST /render` com `preview_id` ainda consiga renderizar as edições salvas na Studio |
+
 ### Response
 
 #### 200 OK
 
 ```json
-{ "deleted": true }
+{ "deleted": true, "purged": false }
 ```
 
 #### 404 Not Found
@@ -188,7 +199,11 @@ Retornado quando o `previewId` não corresponde ao preview ativo (ou não há pr
 ### Exemplo cURL
 
 ```bash
+# Encerra o studio, mantém os arquivos (ainda dá para renderizar por preview_id)
 curl -X DELETE http://localhost:3030/preview/550e8400-e29b-41d4-a716-446655440000
+
+# Encerra e apaga tudo
+curl -X DELETE "http://localhost:3030/preview/550e8400-e29b-41d4-a716-446655440000?purge=true"
 ```
 
 ---
@@ -215,7 +230,19 @@ POST /preview
   └── responde 201 com preview_url
 
 DELETE /preview/:previewId
-  └── killActivePreview() → SIGTERM + --kill-all + rm dir
+  └── killActivePreview() → SIGTERM + --kill-all
+        └── arquivos MANTIDOS (a menos de ?purge=true) para permitir
+            POST /render { preview_id } com as edições salvas na Studio
+```
+
+### Editar e renderizar
+
+```
+POST /preview                      → preview_url + preview_id
+  ↓
+abrir preview_url, editar e SALVAR na Studio
+  ↓  (a Studio grava em /tmp/hf-previews/{preview_id}/)
+POST /render { "preview_id": ... } → renderiza o que foi salvo
 ```
 
 ---
@@ -224,17 +251,19 @@ DELETE /preview/:previewId
 
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
+| `PUBLIC_BASE_URL` | *(vazio)* | URL pública **desta porta (3030)**. Definida, faz `preview_url` apontar para a Studio proxiada — a única em que salvar edições funciona fora de HTTPS/localhost |
 | `PREVIEW_PORT` | `3031` | Porta em que o studio escuta dentro do container |
-| `PUBLIC_PREVIEW_URL` | `http://localhost:3031` | URL base retornada ao cliente como `preview_url` — deve ser a URL pública acessível pelo browser |
+| `PUBLIC_PREVIEW_URL` | `http://localhost:3031` | URL pública da porta do studio, retornada como `preview_url_direct` |
+| `PREVIEW_RETENTION_MS` | `86400000` (24h) | Por quanto tempo os arquivos de um preview sobrevivem depois que o processo morre |
+| `STUDIO_PROXY` | `true` | `false` desliga o proxy da Studio nesta porta |
 
 **Exemplo para produção no Coolify/VPS:**
 
 ```
+PUBLIC_BASE_URL=http://meu-vps.com:3030
 PREVIEW_PORT=3031
 PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
 ```
-
-A porta `3031` (ou o valor de `PREVIEW_PORT`) deve estar exposta no `docker-compose.yaml` e aberta no firewall.
 
 ---
 
@@ -244,4 +273,5 @@ A porta `3031` (ou o valor de `PREVIEW_PORT`) deve estar exposta no `docker-comp
 - **Porta real pode diferir:** se `PREVIEW_PORT` estiver ocupada, o `hyperframes preview` escolhe outra porta; o servidor parseia a porta real do stdout e reconstrói `preview_url` automaticamente
 - **`--kill-all`:** antes de cada preview, o servidor executa `hyperframes preview --kill-all` para limpar studios zumbis que o processo pai não conseguiu encerrar
 - **TTL:** o processo é encerrado via SIGTERM após 2 horas; use `DELETE` para encerrar antes
-- Uso típico: visualizar e ajustar a composição antes de chamar `POST /render` para gerar o MP4 final
+- **Arquivos sobrevivem ao processo:** encerrar o preview (por TTL, por um novo `POST /preview` ou por `DELETE`) **não** apaga os arquivos. Eles ficam por `PREVIEW_RETENTION_MS` (24h), então o `preview_id` continua renderizável mesmo depois do studio morrer — inclusive o de um preview que foi substituído por outro
+- Uso típico: visualizar e **editar** a composição na Studio, e então chamar `POST /render` com o `preview_id` para gerar o MP4 com as edições
