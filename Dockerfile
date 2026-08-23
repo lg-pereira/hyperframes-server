@@ -56,7 +56,9 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 # ── Copia o servidor ──────────────────────────────────────────────────────────
-COPY server.mjs .
+# studio-polyfill.js é lido no boot e injetado no HTML da Studio servida pelo
+# proxy — sem ele, salvar edições quebra fora de HTTPS/localhost.
+COPY server.mjs studio-polyfill.js ./
 
 # ── Usuário sem privilégios para rodar o Chromium com segurança ───────────────
 RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
@@ -65,9 +67,11 @@ RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
 
 USER pptruser
 
+# API + Studio (a Studio é servida por esta porta, com o polyfill de secure
+# context injetado — é por aqui que salvar edições funciona).
 EXPOSE 3030
-# Porta da Studio (preview embutido, POST /preview). Precisa estar declarada aqui para
-# o Coolify detectar/oferecer essa porta ao configurar domínio + HTTPS — ver docs/deploy.md.
+# Porta do studio do hyperframes. Continua exposta para acesso direto/diagnóstico,
+# mas sem o polyfill: salvar por ela só funciona em HTTPS ou localhost.
 EXPOSE 3031
 
 # ── init=true no Compose resolve o PID 1 / processos zumbi do Chromium ───────
