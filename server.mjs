@@ -1,6 +1,14 @@
 import Fastify from "fastify";
 import { execFile } from "node:child_process";
-import { writeFile, mkdir, rm, readFile, stat } from "node:fs/promises";
+import {
+  writeFile,
+  mkdir,
+  rm,
+  readFile,
+  stat,
+  cp,
+  readdir,
+} from "node:fs/promises";
 import { join, dirname, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
@@ -32,20 +40,51 @@ const PUBLIC_PREVIEW_URL = (
   process.env.PUBLIC_PREVIEW_URL ?? `http://localhost:${PREVIEW_PORT}`
 ).replace(/\/$/, "");
 
-// Apenas um preview ativo por vez
-let activePreview = null; // { proc, previewId, timer }
+// URL pública desta porta (PORT/3030), por onde a Studio é servida via proxy.
+// É o que resolve o bug de save: proxiando a Studio por aqui o servidor consegue
+// injetar o polyfill de secure context no HTML dela (ver studio-polyfill.js).
+// Enquanto NÃO estiver definida, `preview_url` continua apontando para a 3031
+// exatamente como antes — a migração é opt-in. Ex: PUBLIC_BASE_URL=http://meu-vps.com:3030
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL ?? "").replace(/\/$/, "");
 
-// Mata o processo ativo e limpa todos os studios registrados pelo hyperframes
-async function killActivePreview() {
+// Desliga o proxy da Studio sem precisar de deploy de código (rollback por env var).
+const STUDIO_PROXY_ENABLED = process.env.STUDIO_PROXY !== "false";
+
+// Por quanto tempo os arquivos de um preview sobrevivem depois que o processo morre.
+// Precisam sobreviver para que `POST /render {preview_id}` renderize as edições que
+// foram salvas na Studio. Padrão: 24 horas.
+const PREVIEW_RETENTION_MS = parseInt(
+  process.env.PREVIEW_RETENTION_MS ?? String(24 * 60 * 60 * 1000),
+);
+
+// Apenas um preview ativo por vez
+let activePreview = null; // { proc, previewId, port, timer }
+
+// URL pública da Studio servida por ESTA porta (com o polyfill injetado), ou null
+// quando o proxy está desligado ou PUBLIC_BASE_URL não foi definida — caso em que
+// o comportamento antigo (entregar a porta do studio direto) é preservado.
+function studioProxyUrl() {
+  if (!STUDIO_PROXY_ENABLED || !PUBLIC_BASE_URL) return null;
+  return `${PUBLIC_BASE_URL}/`;
+}
+
+// Mata o processo ativo e limpa todos os studios registrados pelo hyperframes.
+// NÃO apaga os arquivos: o que a Studio salvou em disco precisa sobreviver para
+// que `POST /render {preview_id}` consiga renderizar as edições. A limpeza fica
+// a cargo de sweepOldPreviews() (PREVIEW_RETENTION_MS) ou de um DELETE explícito
+// com ?purge=true.
+async function killActivePreview({ purge = false } = {}) {
   if (activePreview) {
     clearTimeout(activePreview.timer);
     try {
       activePreview.proc.kill("SIGTERM");
     } catch {}
-    rm(join(PREVIEW_DIR, activePreview.previewId), {
-      recursive: true,
-      force: true,
-    }).catch(() => {});
+    if (purge) {
+      rm(join(PREVIEW_DIR, activePreview.previewId), {
+        recursive: true,
+        force: true,
+      }).catch(() => {});
+    }
     activePreview = null;
   }
   // Garante que o registry interno do hyperframes seja limpo antes do próximo preview
@@ -113,6 +152,36 @@ function spawnPreview(dir, port) {
 
 await mkdir(WORK_DIR, { recursive: true });
 await mkdir(PREVIEW_DIR, { recursive: true });
+
+// Remove diretórios de preview mais velhos que PREVIEW_RETENTION_MS. Como
+// killActivePreview() deixou de apagá-los (para preservar as edições da Studio),
+// esta é a única coisa que impede o volume hf_previews de crescer sem limite.
+async function sweepOldPreviews() {
+  const cutoff = Date.now() - PREVIEW_RETENTION_MS;
+  let entries;
+  try {
+    entries = await readdir(PREVIEW_DIR);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    // Nunca remove o preview ativo, por mais velho que seja
+    if (activePreview && entry === activePreview.previewId) continue;
+    const dir = join(PREVIEW_DIR, entry);
+    try {
+      const info = await stat(dir);
+      if (info.mtimeMs < cutoff) {
+        await rm(dir, { recursive: true, force: true });
+        app.log.info({ previewId: entry }, "Preview expirado removido");
+      }
+    } catch {}
+  }
+}
+
+// Formato exato de randomUUID(). Usado para validar ids vindos do cliente antes
+// de compô-los num path.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Rejeita paths absolutos ou que escapem do diretório de sessão via "..",
 // para impedir escrita fora do previewDir/jobDir (path traversal).
@@ -277,6 +346,7 @@ app.post(
           properties: {
             preview_id: { type: "string" },
             preview_url: { type: "string" },
+            preview_url_direct: { type: "string" },
             expires_in: { type: "string" },
           },
         },
@@ -287,18 +357,17 @@ app.post(
     const { html, compositions = [], assets = [] } = req.body;
 
     // A Studio usa globalThis.crypto.randomUUID/crypto.subtle ao salvar edições, e o
-    // navegador só expõe essas APIs em secure context (HTTPS ou localhost). Se
-    // PUBLIC_PREVIEW_URL apontar pra HTTP fora de localhost, o save vai falhar na Studio
-    // mesmo com o preview funcionando — avisa no log sem bloquear a criação do preview.
-    if (PUBLIC_PREVIEW_URL.startsWith("http://")) {
-      const previewHost = new URL(PUBLIC_PREVIEW_URL).hostname;
-      if (previewHost !== "localhost" && previewHost !== "127.0.0.1") {
-        app.log.warn(
-          { publicPreviewUrl: PUBLIC_PREVIEW_URL },
-          "PUBLIC_PREVIEW_URL não é HTTPS nem localhost — a Studio vai falhar ao salvar edições " +
-            "(crypto.randomUUID/crypto.subtle indisponíveis fora de secure context). Configure HTTPS no Coolify.",
-        );
-      }
+    // navegador só expõe essas APIs em secure context (HTTPS ou localhost). Servir em
+    // HTTP puro fora de localhost quebra todo save. O proxy desta porta injeta o
+    // polyfill que cobre isso — mas só quem abrir a Studio POR AQUI fica protegido.
+    if (!studioProxyUrl()) {
+      app.log.warn(
+        { publicPreviewUrl: PUBLIC_PREVIEW_URL },
+        "Studio sendo servida direto pela porta do preview, sem o proxy desta porta: se a " +
+          "URL não for HTTPS nem localhost, o save vai falhar (crypto.randomUUID/crypto.subtle " +
+          "indisponíveis fora de secure context). Defina PUBLIC_BASE_URL para servir a Studio " +
+          "por esta porta com o polyfill injetado.",
+      );
     }
 
     // Encerra qualquer preview anterior e limpa o registry do hyperframes
@@ -326,21 +395,29 @@ app.post(
       return reply.code(500).send({ error: err.message });
     }
 
-    // Reconstrói a URL pública usando a porta real (pode diferir de PREVIEW_PORT)
+    // Reconstrói a URL pública direta (porta do studio) usando a porta real,
+    // que pode diferir de PREVIEW_PORT se houve conflito.
     const basePublic = PUBLIC_PREVIEW_URL.replace(/:\d+$/, "");
-    const previewUrl =
+    const directUrl =
       actualPort === PREVIEW_PORT
         ? PUBLIC_PREVIEW_URL
         : `${basePublic}:${actualPort}`;
 
+    // Com PUBLIC_BASE_URL definida, a URL entregue é a proxiada por esta porta —
+    // é a única em que o polyfill de secure context é injetado, ou seja, a única
+    // em que salvar edições funciona fora de HTTPS/localhost. Sem ela, o valor
+    // continua sendo exatamente o de antes (porta do studio, sem polyfill).
+    const previewUrl = studioProxyUrl() ?? directUrl;
+
     const timer = setTimeout(() => killActivePreview(), PREVIEW_TTL_MS);
-    activePreview = { proc, previewId, timer };
+    activePreview = { proc, previewId, port: actualPort, timer };
 
     app.log.info({ previewId, port: actualPort }, "Preview started");
 
     reply.code(201).send({
       preview_id: previewId,
       preview_url: previewUrl,
+      preview_url_direct: directUrl,
       expires_in: "2 horas",
     });
   },
@@ -352,12 +429,34 @@ app.delete(
   {
     schema: {
       summary: "Encerra o preview ativo",
+      description:
+        "Encerra o processo do studio e libera a porta. Por padrão os arquivos do " +
+        "preview são MANTIDOS em disco, para que `POST /render {preview_id}` ainda " +
+        "consiga renderizar as edições salvas na Studio. Use ?purge=true para apagá-los " +
+        "também; caso contrário são removidos pela retenção (PREVIEW_RETENTION_MS, 24h).",
       params: {
         type: "object",
         properties: { previewId: { type: "string" } },
       },
+      querystring: {
+        type: "object",
+        properties: {
+          purge: {
+            type: "boolean",
+            default: false,
+            description:
+              "Se true, apaga também os arquivos do preview (as edições salvas são perdidas)",
+          },
+        },
+      },
       response: {
-        200: { type: "object", properties: { deleted: { type: "boolean" } } },
+        200: {
+          type: "object",
+          properties: {
+            deleted: { type: "boolean" },
+            purged: { type: "boolean" },
+          },
+        },
       },
     },
   },
@@ -365,9 +464,10 @@ app.delete(
     if (!activePreview || activePreview.previewId !== req.params.previewId) {
       return reply.code(404).send({ error: "Preview não encontrado" });
     }
-    await killActivePreview();
-    app.log.info({ previewId: req.params.previewId }, "Preview deleted");
-    return { deleted: true };
+    const purge = req.query.purge === true;
+    await killActivePreview({ purge });
+    app.log.info({ previewId: req.params.previewId, purge }, "Preview deleted");
+    return { deleted: true, purged: purge };
   },
 );
 
@@ -773,14 +873,26 @@ app.post(
   {
     schema: {
       summary: "Envia uma composição HTML para renderização",
-      description: "Inicia um job assíncrono. Retorna job_id para polling.",
+      description:
+        "Inicia um job assíncrono. Retorna job_id para polling.\n\n" +
+        "Aceita a composição de duas formas mutuamente exclusivas: `html` (com os " +
+        "opcionais `compositions`/`assets`), ou `preview_id` — que renderiza o " +
+        "diretório de um preview existente **como ele está no disco**, incluindo as " +
+        "edições salvas na Studio. Com `preview_id` os assets já estão no diretório, " +
+        "então não precisam ser reenviados.",
       body: {
         type: "object",
-        required: ["html"],
         properties: {
           html: {
             type: "string",
-            description: "Conteúdo do index.html da composição HyperFrames",
+            description:
+              "Conteúdo do index.html da composição HyperFrames. Mutuamente exclusivo com preview_id.",
+          },
+          preview_id: {
+            type: "string",
+            description:
+              "UUID devolvido por POST /preview. Renderiza o diretório desse preview como está " +
+              "em disco (com as edições salvas na Studio). Mutuamente exclusivo com html.",
           },
           compositions: {
             type: "array",
@@ -849,22 +961,70 @@ app.post(
     },
   },
   async (req, reply) => {
-    const { html, compositions = [], assets = [], fps = 30 } = req.body;
+    const {
+      html,
+      preview_id: previewIdParam,
+      compositions = [],
+      assets = [],
+      fps = 30,
+    } = req.body;
+
+    // Exatamente um dos dois. Aceitar os dois juntos seria ambíguo justamente no
+    // caso que importa: renderizar depois de editar na Studio.
+    if (!html && !previewIdParam) {
+      return reply
+        .code(400)
+        .send({ error: 'Informe "html" ou "preview_id" (um dos dois)' });
+    }
+    if (html && previewIdParam) {
+      return reply
+        .code(400)
+        .send({ error: '"html" e "preview_id" são mutuamente exclusivos' });
+    }
+
+    // O previewId vem do cliente e é concatenado num path — restringe ao formato
+    // exato que randomUUID() gera, o que também barra qualquer traversal.
+    if (previewIdParam && !UUID_RE.test(previewIdParam)) {
+      return reply
+        .code(400)
+        .send({ error: `preview_id inválido: "${previewIdParam}"` });
+    }
 
     const jobId = randomUUID();
     const jobDir = join(WORK_DIR, jobId);
     const outputDir = join(jobDir, "output");
 
-    await mkdir(outputDir, { recursive: true });
-
-    try {
-      await writeCompositionFiles(jobDir, html, compositions);
-      for (const asset of assets) {
-        await saveAsset(jobDir, asset);
+    if (previewIdParam) {
+      const previewDir = join(PREVIEW_DIR, previewIdParam);
+      if (!existsSync(previewDir)) {
+        return reply.code(404).send({
+          error:
+            `Preview "${previewIdParam}" não encontrado (expirado ou nunca criado). ` +
+            "Crie um novo com POST /preview.",
+        });
       }
-    } catch (err) {
-      await rm(jobDir, { recursive: true, force: true });
-      return reply.code(400).send({ error: err.message });
+      try {
+        // Copia em vez de renderizar no lugar: o job fica independente do preview,
+        // que pode seguir sendo editado ou expirar sem afetar este render.
+        await cp(previewDir, jobDir, { recursive: true });
+        await mkdir(outputDir, { recursive: true });
+      } catch (err) {
+        await rm(jobDir, { recursive: true, force: true });
+        return reply.code(500).send({
+          error: `Falha ao copiar o diretório do preview: ${err.message}`,
+        });
+      }
+    } else {
+      await mkdir(outputDir, { recursive: true });
+      try {
+        await writeCompositionFiles(jobDir, html, compositions);
+        for (const asset of assets) {
+          await saveAsset(jobDir, asset);
+        }
+      } catch (err) {
+        await rm(jobDir, { recursive: true, force: true });
+        return reply.code(400).send({ error: err.message });
+      }
     }
 
     const outputFile = join(outputDir, "video.mp4");
@@ -1071,10 +1231,168 @@ app.get(
   },
 );
 
+// ─── Proxy da Studio ──────────────────────────────────────────────────────────
+// Serve a Studio do `hyperframes preview` por ESTA porta, para poder injetar o
+// polyfill de secure context no HTML dela (studio-polyfill.js). Sem isso, salvar
+// edições só funciona em HTTPS ou localhost — ver o comentário no polyfill.
+//
+// Registrado como um conjunto EXPLÍCITO de rotas, nunca como catch-all: são
+// exatamente as rotas de topo do app Hono da Studio, nenhuma delas existente
+// nesta API. Assim a mudança é puramente aditiva — nenhuma rota atual é
+// interceptada e um path inexistente continua devolvendo o 404 do Fastify.
+//
+// O cliente da Studio só usa caminhos relativos de mesma origem e faz hash
+// routing (#/projects/:id), então proxiar na raiz funciona sem reescrever nada.
+// O live-reload é SSE (/api/events), não WebSocket.
+if (STUDIO_PROXY_ENABLED) {
+  const POLYFILL = await readFile(
+    fileURLToPath(new URL("./studio-polyfill.js", import.meta.url)),
+    "utf8",
+  );
+
+  await app.register(async (studio) => {
+    await studio.register(import("@fastify/reply-from"), {
+      base: `http://127.0.0.1:${PREVIEW_PORT}`,
+      // O SSE de /api/events fica aberto indefinidamente; sem zerar esses
+      // timeouts o undici derruba a conexão e o live-reload da Studio morre.
+      undici: { bodyTimeout: 0, headersTimeout: 0 },
+    });
+
+    // Repassa o corpo cru para o upstream. Encapsulado neste escopo, então o
+    // parsing JSON das rotas da API principal não é afetado.
+    studio.addContentTypeParser("*", (req, payload, done) => done(null, payload));
+
+    // A porta real pode diferir de PREVIEW_PORT se houve conflito no spawn.
+    const upstream = () => `http://127.0.0.1:${activePreview.port}`;
+
+    // Sem preview ativo não há para onde proxiar — responde com algo acionável
+    // em vez de estourar um ECONNREFUSED contra uma porta morta.
+    const requirePreview = (req, reply, done) => {
+      if (!activePreview) {
+        reply.code(503).send({
+          error: "Nenhum preview ativo. Chame POST /preview primeiro.",
+        });
+        return;
+      }
+      done();
+    };
+
+    // Passthrough puro — nada é bufferizado nem transformado.
+    //
+    // O `onResponse` existe só por causa do SSE: o Node não manda os headers da
+    // resposta enquanto o primeiro byte de corpo não sai, e o /api/events da
+    // Studio fica em silêncio até algum arquivo mudar. Sem um flush explícito o
+    // EventSource do navegador fica pendurado esperando os headers e o
+    // live-reload nunca conecta. (O Hono do upstream faz esse flush sozinho; ao
+    // proxiar, ele passa a ser responsabilidade nossa.)
+    const passthrough = (req, reply) =>
+      reply.from(req.raw.url, {
+        getUpstream: upstream,
+        onResponse: (originalReq, replyTo, bodyStream) => {
+          const isEventStream = String(
+            replyTo.getHeader("content-type") ?? "",
+          ).includes("text/event-stream");
+          replyTo.send(bodyStream);
+          if (isEventStream) {
+            setImmediate(() => {
+              try {
+                replyTo.raw.flushHeaders();
+              } catch {}
+            });
+          }
+        },
+      });
+
+    // Só o documento HTML da Studio é bufferizado, para injetar o polyfill antes
+    // do bundle. Ele é type="module" (deferido), então um <script> clássico no
+    // <head> sempre roda primeiro — que é o requisito.
+    const serveStudioHtml = (req, reply) =>
+      reply.from(req.raw.url, {
+        getUpstream: upstream,
+        rewriteRequestHeaders: (originalReq, headers) => {
+          const out = { ...headers };
+          // Precisamos do HTML em texto para injetar: sem corpo (304) ou
+          // comprimido, a injeção não teria como acontecer.
+          delete out["if-none-match"];
+          delete out["if-modified-since"];
+          out["accept-encoding"] = "identity";
+          return out;
+        },
+        // reply-from já copiou headers e status para `replyTo`; o terceiro
+        // argumento é só o stream do corpo.
+        onResponse: async (originalReq, replyTo, bodyStream) => {
+          const type = String(replyTo.getHeader("content-type") ?? "");
+          if (!type.includes("text/html")) {
+            replyTo.send(bodyStream);
+            return;
+          }
+          try {
+            const chunks = [];
+            for await (const chunk of bodyStream) chunks.push(chunk);
+            const html = Buffer.concat(chunks)
+              .toString("utf8")
+              .replace("<head>", `<head><script>${POLYFILL}</script>`);
+            replyTo
+              .header("content-length", Buffer.byteLength(html))
+              .removeHeader("content-encoding")
+              .send(html);
+          } catch (err) {
+            req.log.error({ err }, "Falha ao injetar o polyfill no HTML da Studio");
+            replyTo.code(502).send({
+              error: `Falha ao servir a Studio: ${err.message}`,
+            });
+          }
+        },
+      });
+
+    const proxied = [
+      ["GET", "/", serveStudioHtml],
+      ["GET", "/studio", serveStudioHtml],
+      ["GET", "/__hyperframes_config", passthrough],
+      ["GET", "/assets/*", passthrough],
+      ["GET", "/icons/*", passthrough],
+      ["GET", "/favicon.svg", passthrough],
+    ];
+    for (const [method, url, handler] of proxied) {
+      studio.route({
+        method,
+        url,
+        preHandler: requirePreview,
+        handler,
+        schema: { hide: true },
+      });
+    }
+
+    // Toda a API da Studio (arquivos, mutações, preview, render, SSE).
+    studio.route({
+      method: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+      url: "/api/*",
+      preHandler: requirePreview,
+      handler: passthrough,
+      schema: { hide: true },
+    });
+  });
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 try {
   await app.listen({ port: PORT, host: HOST });
   app.log.info(`Docs disponíveis em http://localhost:${PORT}/docs`);
+
+  if (STUDIO_PROXY_ENABLED) {
+    app.log.info(
+      { publicBaseUrl: PUBLIC_BASE_URL || null },
+      PUBLIC_BASE_URL
+        ? `Studio proxiada nesta porta (polyfill de secure context ativo) — preview_url usará ${PUBLIC_BASE_URL}/`
+        : `Studio proxiada em http://localhost:${PORT}/ — defina PUBLIC_BASE_URL para que preview_url aponte para cá`,
+    );
+  } else {
+    app.log.info("Proxy da Studio desligado (STUDIO_PROXY=false)");
+  }
+
+  // Retenção dos diretórios de preview: uma passada no boot e depois de hora em hora.
+  sweepOldPreviews();
+  setInterval(sweepOldPreviews, 60 * 60 * 1000).unref();
 } catch (err) {
   app.log.error(err);
   process.exit(1);

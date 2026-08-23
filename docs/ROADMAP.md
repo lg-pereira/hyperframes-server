@@ -4,11 +4,19 @@ Histórico de features implementadas (e uma pendência de infra). Cada seção d
 
 ---
 
-## 1. HTTPS obrigatório para edição na Studio — ✅ código concluído, ⏳ infra pendente
+## 1. Salvar edições na Studio — ✅ resolvido em código (sem depender de infra)
 
 ### Status
 
-Código e docs implementados (ver commits/diff em `docker-compose.yaml`, `server.mjs`, `docs/deploy.md`). Falta o passo 1 (Coolify), que só pode ser executado por quem tem acesso ao painel — **pausado por enquanto** a pedido do usuário. O domínio não fica fixo no repositório: `PUBLIC_PREVIEW_URL` é definida direto como variável de ambiente no painel do Coolify (sem default no `docker-compose.yaml`). Ver checklist em [docs/deploy.md § HTTPS obrigatório para edição na Studio](deploy.md#https-obrigatório-para-edição-na-studio).
+Resolvido. A Studio passou a ser servida pela porta da API (3030) via proxy, o que deu ao servidor um ponto de injeção para o polyfill de secure context. **Salvar edições funciona em HTTP puro** — nenhuma configuração de TLS é necessária. Ver [server.mjs](../server.mjs) (seção "Proxy da Studio"), [studio-polyfill.js](../studio-polyfill.js) e [docs/deploy.md § Edição na Studio](deploy.md#edição-na-studio-salvar--como-funciona).
+
+### Correção de rumo
+
+A versão anterior desta seção concluía que **"não dá para corrigir só editando este repo — a correção é infraestrutura (HTTPS no Coolify)"**. Isso estava **errado**, e a conclusão custou tempo: o passo de infra ficou pendente por semanas enquanto os erros continuavam em produção.
+
+O que faltava não era TLS, era um **ponto de injeção**. O bundle da Studio de fato não tem fallback nos dois call sites — mas nada obriga o servidor a entregar o HTML da Studio sem tocá-lo. Proxiando a Studio pela porta da API, o servidor injeta um `<script>` no `<head>` (antes do bundle, que é `type="module"` e portanto deferido) e define `crypto.randomUUID`/`crypto.subtle.digest` antes de qualquer código da Studio rodar.
+
+Lição: "o bundle de terceiros não tem fallback" limita o que dá para consertar **dentro** do bundle, não o que dá para consertar no caminho até o navegador.
 
 ### Motivação
 
@@ -21,30 +29,26 @@ Usuários reportam estes erros ao editar vídeos na Studio (preview embutido, se
 
 ### Causa raiz (confirmada por leitura de código)
 
-- `node_modules/hyperframes/dist/studio/index.js` usa `globalThis.crypto.randomUUID()` sem fallback em `createStudioWriteToken()` (~linha 12028) para gerar o token de escrita enviado em **todo** save/mutação (13 call sites: save de HTML, edição animada, corte/split).
-- Também usa `globalThis.crypto.subtle.digest("SHA-256", ...)` sem guarda em `studioFileContentVersion()` (~linha 54166), usado para checagem de concorrência otimista antes de salvar.
+- `node_modules/hyperframes/dist/studio/index.js` usa `globalThis.crypto.randomUUID()` sem fallback em `createStudioWriteToken()`, que monta o header `X-Hyperframes-Write-Token` de **toda** mutação (save de HTML, edição animada, corte/split).
+- Também usa `globalThis.crypto.subtle.digest("SHA-256", ...)` sem guarda em `studioFileContentVersion()`, usado na checagem de concorrência otimista antes de cada save.
 - `crypto.randomUUID` e `crypto.subtle` só existem no navegador em **contexto seguro** (HTTPS ou `localhost`). Fora disso, ambos são `undefined`.
-- O deploy atual serve a Studio em **HTTP puro**: até a correção abaixo, [docker-compose.yaml:29](../docker-compose.yaml#L29) definia `PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL:-http://100.121.2.102:3031}`; [server.mjs:29](../server.mjs#L29) também cai em `http://localhost:${PREVIEW_PORT}` quando a env var não está setada. Não há Traefik/nginx/TLS configurado em nenhum lugar do repo — isso ainda depende do passo 1 (Coolify) ser executado.
-- Como o navegador acessa a Studio via `http://<IP-do-VPS>:3031` (nem `localhost`, nem HTTPS), `crypto.randomUUID`/`crypto.subtle` ficam indefinidos → dispara os erros #4 e #5 diretamente; os outros três são os catches downstream (`reportFailure`, ~linha 54171, e ~linha 60858) do mesmo erro.
+- O deploy servia a Studio em HTTP puro (`http://<IP>:3031`) — nem `localhost`, nem HTTPS. Os erros #4 e #3 são os diretos; os outros são os catches downstream do mesmo erro.
 
-Não dá para corrigir só editando este repo — o bundle da Studio não expõe fallback para os dois call sites. **A correção real é infraestrutura.**
+### O que foi implementado
 
-### Passos de implementação
-
-1. **⏳ Infra (Coolify) — pendente/pausado, requer acesso ao painel:** configurar um domínio com HTTPS (Let's Encrypt automático) apontando para a porta 3031 do container `hyperframes-server`, do mesmo jeito que já deve existir para a porta 3030 (API). O domínio em si é decisão de infra, definido direto no Coolify — não fica hardcoded no repo. Checklist completo em [docs/deploy.md § HTTPS obrigatório para edição na Studio](deploy.md#https-obrigatório-para-edição-na-studio).
-2. **✅ `docker-compose.yaml`:** `PUBLIC_PREVIEW_URL` ([linha 34](../docker-compose.yaml#L34)) não tem mais default — `PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL}`, definida só via env var no Coolify, sem domínio fixo no repositório. Comentário (linhas 29-33) explica que a URL precisa ser HTTPS/`localhost` — é requisito de _secure context_ do navegador, não só "acessível".
-3. **✅ `server.mjs` — warning em runtime:** em `POST /preview` ([server.mjs:216-231](../server.mjs#L216-L231)), loga `app.log.warn` quando `PUBLIC_PREVIEW_URL` começa com `http://` e o host não é `localhost`/`127.0.0.1`. Não bloqueia a criação do preview. Testado manualmente: warning dispara com host HTTP externo, não dispara com `localhost`.
-4. **✅ `docs/deploy.md`:** nova seção "HTTPS obrigatório para edição na Studio" com a causa raiz e o passo a passo no Coolify para expor a porta 3031 com domínio + TLS.
+1. **[studio-polyfill.js](../studio-polyfill.js):** reimplementa `crypto.randomUUID` (UUID v4 sobre `crypto.getRandomValues`, que **não** é secure-context gated), `crypto.subtle.digest("SHA-256")` (JS puro) e `navigator.clipboard.writeText`. Tudo sob guarda — em HTTPS/`localhost` é no-op completo.
+2. **Proxy da Studio em [server.mjs](../server.mjs):** rotas explícitas (`/`, `/studio`, `/__hyperframes_config`, `/api/*`, `/assets/*`, `/icons/*`, `/favicon.svg`) — as rotas de topo do app Hono da Studio, nenhuma delas existente nesta API. Sem catch-all, para não alterar o 404 de nenhuma rota atual. O HTML é o único response bufferizado (para a injeção); o resto passa como stream.
+3. **`PUBLIC_BASE_URL`:** define para onde `preview_url` aponta. Sem ela, o comportamento é idêntico ao anterior — a migração é opt-in e o rollback é remover a variável. `STUDIO_PROXY=false` desliga o proxy inteiro.
+4. **[test/polyfill.test.mjs](../test/polyfill.test.mjs) (`npm test`):** compara o SHA-256 do polyfill com `node:crypto` nos casos de borda do padding, UTF-8 multibyte e payload grande. Um hash divergente não daria erro visível — a Studio calcularia uma versão de arquivo que não bate com a do servidor e todo save morreria em `409 conflict`.
 
 ### Verificação
 
-1. ⏳ Após o passo 1 (Coolify) ser executado, abrir a Studio pela URL retornada por `POST /preview`, editar um elemento e confirmar que o save funciona.
-2. ⏳ No console do navegador, confirmar `window.crypto.randomUUID` e `window.crypto.subtle` definidos.
-3. ⏳ Confirmar com o(s) usuário(s) que os 5 erros pararam de ocorrer em uso real.
+Feita localmente (ver §3 para o que depende de Docker):
 
-### Esforço estimado
-
-Baixo (infra + ~15 linhas de código/doc). Código e docs já implementados; o que falta é só a config de TLS no Coolify (passo 1), fora do escopo deste repo.
+- ✅ Save real através do proxy: o SHA-256 do polyfill bate com o `fileContentVersion` do servidor, o `X-Hyperframes-Write-Token` atravessa intacto, `PUT` responde 200 e o arquivo em disco muda.
+- ✅ Live-reload (SSE `/api/events`) entregando `file-change` através do proxy.
+- ✅ Rotas atuais inalteradas, inclusive o 404 de rota inexistente.
+- ⏳ Confirmar com o(s) usuário(s) que os erros pararam de ocorrer em uso real, na VPS.
 
 ---
 
@@ -194,3 +198,47 @@ Reusar a mesma validação de path traversal que `writeCompositionFiles()`/`asse
 ### Esforço estimado
 
 Baixo (~1-2h) — mudança mecânica, reusa 100% da infraestrutura (`writeCompositionFiles`, validação de path) já implementada e testada no item 2.
+
+---
+
+## 4. Renderizar as edições feitas na Studio (`preview_id`) — ✅ concluído em código, ⏳ MP4 a validar no Docker
+
+### Status
+
+Implementado junto com o item 1. Sem ele, corrigir o save não resolveria nada na prática: dava para salvar, mas não para renderizar o que foi salvo.
+
+### Motivação
+
+Mesmo com o save funcionando, o ciclo não fechava. A Studio grava em `/tmp/hf-previews/{previewId}/index.html`, mas:
+
+- `POST /render` só aceitava `html` no corpo — renderizar depois de editar significava reenviar o HTML **antigo**, jogando fora a edição;
+- `killActivePreview()` apagava o diretório no próximo `POST /preview` e no TTL de 2h, então as edições sumiam.
+
+O usuário editava na Studio, via o preview correto, mandava renderizar — e recebia o vídeo **sem** as edições.
+
+### O que foi implementado
+
+1. **`POST /render` aceita `preview_id`** como alternativa a `html`: copia o diretório do preview (com as edições) para o `jobDir` e segue pelo mesmo pipeline de render, sem nenhuma alteração no `execFile`/status/download. Copiar em vez de renderizar no lugar deixa o job independente do preview.
+2. **`html` e `preview_id` são mutuamente exclusivos** — os dois juntos retornam `400`. Aceitar ambos seria ambíguo justamente no caso que importa. O `preview_id` é validado contra o formato de `randomUUID()`, o que também barra traversal.
+3. **Retenção:** `killActivePreview()` deixou de apagar os arquivos. A limpeza passou a ser por `PREVIEW_RETENTION_MS` (24h, varredura de hora em hora que nunca remove o preview ativo) ou por `DELETE /preview/:id?purge=true`. É a única mudança de comportamento em algo que já funcionava; o efeito colateral é uso de disco no volume `hf_previews`, contido pela varredura.
+
+### Ganhos colaterais
+
+- O payload do render fica minúsculo: os assets já estão no diretório do preview, então nada de base64 no corpo — some o limite de tamanho do JSON.
+- Previews concorrentes deixam de atropelar: um novo `POST /preview` encerra o processo do anterior, mas os arquivos ficam, então o `preview_id` antigo continua renderizável.
+
+### Integração no n8n
+
+O sub-workflow `[Video] Hyperframes Preview` já devolve `preview_id` ao workflow pai. As mudanças são pequenas:
+
+1. **`Solicitar Render`** — `jsonBody` vira um ternário: com `preview_id`, manda `{ preview_id, fps }`; senão mantém o payload atual.
+2. **`Composicao Pronta`** — o guard `if (d.html === undefined)` precisa virar `if (d.html === undefined && d.preview_id === undefined)`, senão o fluxo cai no fallback `Extrair HTML` e reconstrói a composição antiga.
+3. **Workflow pai** — guardar o `preview_id` e mandá-lo junto de `mode: "render"` na confirmação.
+4. **`Montar Retorno`** — o remendo que troca `localhost` por IP na `preview_url` pode sair depois que `PUBLIC_BASE_URL` estiver definida.
+
+### Verificação
+
+- ✅ `POST /render {preview_id}` leva o HTML **editado** para o `jobDir`.
+- ✅ Bordas: `html`+`preview_id` → 400; nenhum dos dois → 400; `preview_id` inexistente → 404; `../../etc` → 400.
+- ✅ `POST /render {html}` inalterado, `compositions` e a validação de traversal intactos.
+- ⏳ **MP4 final:** não validável na máquina de desenvolvimento (sem ffmpeg/ffprobe). O render chegou até o CLI com o HTML certo e falhou exatamente em "FFmpeg not found". Precisa ser confirmado no ambiente Docker/Coolify.

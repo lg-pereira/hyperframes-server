@@ -26,11 +26,14 @@ services:
       - NODE_ENV=production
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-      # URL pública da porta do preview studio — DEVE ser HTTPS ou localhost.
-      # A Studio usa globalThis.crypto.randomUUID/crypto.subtle ao salvar edições,
-      # e o navegador só expõe essas APIs em "secure context" (HTTPS ou localhost).
-      # Servir em http://<IP-ou-domínio> quebra o save de edições na Studio.
-      # Sobrescreva no painel do Coolify se o domínio mudar.
+      # URL pública desta porta (3030), por onde a Studio é servida via proxy com o
+      # polyfill de secure context injetado. É o que faz salvar edições funcionar
+      # em HTTP puro. Enquanto NÃO for definida, o POST /preview continua
+      # devolvendo a URL da 3031 (sem polyfill) — a migração é opt-in.
+      # Ex: PUBLIC_BASE_URL=http://meu-vps.com:3030
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      # URL pública da porta do studio (3031), acesso direto/diagnóstico. Sem o
+      # polyfill: salvar por ela só funciona em HTTPS ou localhost.
       - PUBLIC_PREVIEW_URL=${PUBLIC_PREVIEW_URL}
       # A Studio do hyperframes faz bind em 127.0.0.1 por padrão; dentro do container
       # isso a torna inalcançável pelo port-mapping do Docker. 0.0.0.0 expõe em todas

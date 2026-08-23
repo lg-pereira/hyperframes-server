@@ -2,6 +2,11 @@
 
 Submete uma composição HyperFrames para renderização assíncrona. Retorna imediatamente com um `job_id` — o vídeo é processado em background.
 
+A composição pode vir de duas formas **mutuamente exclusivas**:
+
+- **`html`** (com os opcionais `compositions` e `assets`) — envia a composição no corpo da requisição;
+- **`preview_id`** — renderiza o diretório de um preview existente **como ele está no disco**, incluindo o que foi editado e salvo na Studio. Ver [preview.md](./preview.md).
+
 ## Request
 
 **Method:** `POST`  
@@ -12,7 +17,8 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 
 | Campo | Tipo | Obrigatório | Padrão | Descrição |
 |-------|------|-------------|--------|-----------|
-| `html` | `string` | Sim | — | Conteúdo completo do `index.html` da composição HyperFrames |
+| `html` | `string` | Sim* | — | Conteúdo completo do `index.html` da composição HyperFrames. Mutuamente exclusivo com `preview_id` |
+| `preview_id` | `string` | Sim* | — | UUID devolvido por `POST /preview`. Renderiza o diretório desse preview como está em disco, **com as edições salvas na Studio**. Mutuamente exclusivo com `html` |
 | `compositions` | `array` | Não | `[]` | Arquivos de sub-composição adicionais (padrão modular via `data-composition-src`) |
 | `compositions[].path` | `string` | Sim | — | Caminho relativo ao diretório do job, ex: `compositions/scene-1.html` |
 | `compositions[].content` | `string` | Sim | — | Conteúdo do arquivo (HTML com `<template>`, `<style>` e `<script>` da cena) |
@@ -22,9 +28,13 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
 | `assets[].url` | `string` | Sim** | — | URL pública/assinada de um asset já hospedado (bucket/CDN) — o servidor baixa via `fetch` |
 | `fps` | `integer` | Não | `30` | Frames por segundo do vídeo de saída |
 
+**\*Informe `html` **ou** `preview_id`** — exatamente um dos dois. Os dois juntos, ou nenhum, retornam `400`.
+
 **Cada asset precisa de `base64` **ou** `url`** (um dos dois, não ambos). `url` evita o overhead de ~33% do base64 e o limite de tamanho do JSON body — preferível para arquivos grandes ou quando o asset já está hospedado externamente.
 
-`compositions[].path` (e `assets[].filename`) são validados contra path traversal — não podem ser absolutos nem conter `..`. Uma tentativa é rejeitada com `400` antes de qualquer escrita em disco.
+Com `preview_id`, os assets **já estão** no diretório do preview (foram gravados lá pelo `POST /preview`), então `compositions` e `assets` não precisam ser reenviados — o payload fica minúsculo.
+
+`compositions[].path` (e `assets[].filename`) são validados contra path traversal — não podem ser absolutos nem conter `..`. Uma tentativa é rejeitada com `400` antes de qualquer escrita em disco. O `preview_id` é validado contra o formato de UUID, o que também barra traversal.
 
 ### Exemplo de body (simples)
 
@@ -34,6 +44,31 @@ Submete uma composição HyperFrames para renderização assíncrona. Retorna im
   "fps": 30
 }
 ```
+
+### Exemplo de body (renderizando o que foi editado na Studio)
+
+```json
+{
+  "preview_id": "550e8400-e29b-41d4-a716-446655440000",
+  "fps": 30
+}
+```
+
+Fluxo completo:
+
+```
+POST /preview                      → preview_url + preview_id
+  ↓
+abrir preview_url, editar e SALVAR na Studio
+  ↓
+POST /render { "preview_id": ... } → job_id
+  ↓
+GET /status/:job_id → GET /download/:job_id
+```
+
+O diretório do preview é **copiado** para o diretório do job, então o render fica independente: o preview pode continuar sendo editado ou expirar sem afetar um job já submetido.
+
+Os arquivos de um preview sobrevivem por `PREVIEW_RETENTION_MS` (padrão 24h) mesmo depois do processo do studio morrer — inclusive quando ele foi substituído por um `POST /preview` mais novo.
 
 ### Exemplo de body (com assets em base64)
 
@@ -126,6 +161,28 @@ Retornado quando um asset não tem `base64` nem `url`, o download da `url` falha
 { "error": "Path inválido: \"../../etc/passwd\" (não pode ser absoluto nem conter \"..\")" }
 ```
 
+Também retornado quando `html` e `preview_id` vêm juntos, quando nenhum dos dois é informado, ou quando o `preview_id` não tem formato de UUID:
+
+```json
+{ "error": "\"html\" e \"preview_id\" são mutuamente exclusivos" }
+```
+
+```json
+{ "error": "Informe \"html\" ou \"preview_id\" (um dos dois)" }
+```
+
+```json
+{ "error": "preview_id inválido: \"../../etc\"" }
+```
+
+### 404 Not Found
+
+Retornado quando o `preview_id` informado não existe em disco — o preview expirou (`PREVIEW_RETENTION_MS`, padrão 24h) ou nunca foi criado.
+
+```json
+{ "error": "Preview \"550e8400-...\" não encontrado (expirado ou nunca criado). Crie um novo com POST /preview." }
+```
+
 ## Exemplos cURL
 
 ### Renderização simples
@@ -137,6 +194,22 @@ curl -X POST http://localhost:3030/render \
     "html": "<div data-width=\"1920\" data-height=\"1080\"><h1 data-duration=\"3\">Olá Mundo!</h1></div>",
     "fps": 30
   }'
+```
+
+### Renderizando as edições feitas na Studio
+
+```bash
+# 1. cria o preview e guarda o id
+PREVIEW=$(curl -s -X POST http://localhost:3030/preview \
+  -H "Content-Type: application/json" \
+  -d '{"html":"<div data-width=\"1920\" data-height=\"1080\"><h1 class=\"clip\" data-duration=\"3\">Olá!</h1></div>"}')
+PREVIEW_ID=$(echo "$PREVIEW" | jq -r '.preview_id')
+open "$(echo "$PREVIEW" | jq -r '.preview_url')"   # editar e SALVAR na Studio
+
+# 2. renderiza o que foi salvo
+curl -X POST http://localhost:3030/render \
+  -H "Content-Type: application/json" \
+  -d "{\"preview_id\":\"$PREVIEW_ID\",\"fps\":30}"
 ```
 
 ### Com arquivo de áudio

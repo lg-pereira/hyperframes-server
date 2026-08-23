@@ -9,9 +9,9 @@ API REST para renderização de vídeos com [HyperFrames](https://github.com/hey
 | GET | `/health` | Status do servidor |
 | GET | `/docs` | Documentação Swagger interativa |
 | POST | `/lint` | Valida composição sem renderizar (síncrono, < 1s) |
-| POST | `/preview` | Inicia o studio de preview (1 ativo por vez) |
+| POST | `/preview` | Inicia o studio de preview, editável (1 ativo por vez) |
 | DELETE | `/preview/:previewId` | Encerra o preview ativo |
-| POST | `/render` | Envia composição HTML para renderizar |
+| POST | `/render` | Renderiza uma composição (`html`) ou as edições salvas na Studio (`preview_id`) |
 | GET | `/status/:jobId` | Verifica status do job |
 | GET | `/download/:jobId` | Baixa o MP4 gerado |
 | GET | `/logs/:jobId` | Log do processo render (diagnóstico) |
