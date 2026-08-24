@@ -59,11 +59,20 @@ RUN npm ci --omit=dev
 # studio-polyfill.js é lido no boot e injetado no HTML da Studio servida pelo
 # proxy — sem ele, salvar edições quebra fora de HTTPS/localhost.
 COPY server.mjs studio-polyfill.js ./
+COPY mcp ./mcp
+COPY scripts ./scripts
+
+# ── Pré-aquece o cache do MCP ────────────────────────────────────────────────
+# Sem isso a primeira chamada do agente paga ~6s hidratando o catálogo. O script
+# sempre sai com 0: build sem rede não pode quebrar a imagem (o runtime busca sob
+# demanda, e o degrau stale-while-error cobre o GitHub fora do ar).
+ENV MCP_CACHE_DIR=/opt/hf-mcp-cache
+RUN mkdir -p /opt/hf-mcp-cache && node scripts/warm-mcp-cache.mjs
 
 # ── Usuário sem privilégios para rodar o Chromium com segurança ───────────────
 RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
     && mkdir -p /home/pptruser/Downloads /tmp/hf-jobs /tmp/hf-previews \
-    && chown -R pptruser:pptruser /home/pptruser /tmp/hf-jobs /tmp/hf-previews /app
+    && chown -R pptruser:pptruser /home/pptruser /tmp/hf-jobs /tmp/hf-previews /app /opt/hf-mcp-cache
 
 USER pptruser
 

@@ -50,6 +50,10 @@ const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL ?? "").replace(/\/$/, "");
 // Desliga o proxy da Studio sem precisar de deploy de código (rollback por env var).
 const STUDIO_PROXY_ENABLED = process.env.STUDIO_PROXY !== "false";
 
+// Servidor MCP de autoria em /mcp — dá ao agente de IA (n8n) acesso ao contrato de
+// composição e ao catálogo de templates do HyperFrames. Desligável por env var.
+const MCP_ENABLED = process.env.MCP_ENABLED !== "false";
+
 // Por quanto tempo os arquivos de um preview sobrevivem depois que o processo morre.
 // Precisam sobreviver para que `POST /render {preview_id}` renderize as edições que
 // foram salvas na Studio. Padrão: 24 horas.
@@ -1374,6 +1378,14 @@ if (STUDIO_PROXY_ENABLED) {
   });
 }
 
+// ─── MCP de autoria ───────────────────────────────────────────────────────────
+// Expõe o contrato de composição e o catálogo de templates do HyperFrames como
+// tools MCP, para o agente do n8n consultar antes de gerar HTML de cena.
+// Aditivo: /mcp não existe em nenhuma rota anterior, e o plugin é encapsulado.
+if (MCP_ENABLED) {
+  await app.register(import("./mcp/index.mjs"), { prefix: "/mcp" });
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 try {
   await app.listen({ port: PORT, host: HOST });
@@ -1389,6 +1401,12 @@ try {
   } else {
     app.log.info("Proxy da Studio desligado (STUDIO_PROXY=false)");
   }
+
+  app.log.info(
+    MCP_ENABLED
+      ? `MCP de autoria em http://localhost:${PORT}/mcp (transporte httpStreamable)`
+      : "MCP de autoria desligado (MCP_ENABLED=false)",
+  );
 
   // Retenção dos diretórios de preview: uma passada no boot e depois de hora em hora.
   sweepOldPreviews();

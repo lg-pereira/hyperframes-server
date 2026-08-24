@@ -29,6 +29,7 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 | `GET` | `/status/:jobId` | Verifica status de um job | [status.md](./status.md) |
 | `GET` | `/download/:jobId` | Baixa o MP4 gerado | [download.md](./download.md) |
 | `GET` | `/logs/:jobId` | Log do processo render (diagnóstico) | [logs.md](./logs.md) |
+| `POST` | `/mcp` | Servidor MCP: contrato de composição e catálogo de templates para o agente de IA | [mcp.md](./mcp.md) |
 | `GET` | `/docs` | Swagger UI interativo | — |
 
 ## Fluxos típicos
@@ -110,6 +111,14 @@ done
 curl -o "video-$JOB_ID.mp4" "$BASE/download/$JOB_ID"
 echo "Vídeo salvo: video-$JOB_ID.mp4"
 ```
+
+### Autoria assistida por IA (MCP)
+
+```
+POST /mcp   → tools MCP para um agente consultar antes de gerar HTML
+```
+
+Expõe o contrato de composição do HyperFrames e o catálogo de 372 templates (transições, efeitos, cenas prontas) como tools MCP. Feito para o nó **MCP Client Tool** do n8n. Ver [mcp.md](./mcp.md).
 
 ## Deploy
 
