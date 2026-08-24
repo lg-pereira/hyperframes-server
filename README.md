@@ -15,6 +15,7 @@ API REST para renderização de vídeos com [HyperFrames](https://github.com/hey
 | GET | `/status/:jobId` | Verifica status do job |
 | GET | `/download/:jobId` | Baixa o MP4 gerado |
 | GET | `/logs/:jobId` | Log do processo render (diagnóstico) |
+| POST | `/mcp` | Servidor MCP: contrato e catálogo de templates para o agente de IA |
 
 ## Uso rápido
 
@@ -108,6 +109,7 @@ Ver pasta [`docs/`](./docs/) para a referência completa da API e guia de deploy
 - [docs/status.md](./docs/status.md) — `GET /status/:jobId`
 - [docs/download.md](./docs/download.md) — `GET /download/:jobId`
 - [docs/health.md](./docs/health.md) — `GET /health`
+- [docs/mcp.md](./docs/mcp.md) — `POST /mcp` (servidor MCP de autoria)
 - [docs/deploy.md](./docs/deploy.md) — Deploy (Docker Compose, Coolify)
 
 ## Stack
