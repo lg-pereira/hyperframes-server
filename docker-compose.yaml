@@ -39,6 +39,12 @@ services:
       # isso a torna inalcançável pelo port-mapping do Docker. 0.0.0.0 expõe em todas
       # as interfaces para que a porta 3031 publicada funcione.
       - HYPERFRAMES_PREVIEW_HOST=0.0.0.0
+      # Servidor MCP de autoria em /mcp — dá ao agente do n8n acesso ao contrato de
+      # composição e ao catálogo de templates. MCP_ENABLED=false desliga.
+      - MCP_ENABLED=${MCP_ENABLED:-true}
+      # Cache do MCP. Aquecido no build da imagem; o volume abaixo o mantém entre
+      # restarts e permite atualizar sem rebuild quando o TTL de 24h vence.
+      - MCP_CACHE_DIR=/opt/hf-mcp-cache
       # Workers paralelos de render. A VPS tem 4 cores; o `auto` calibra a frio e trava
       # em 1 worker, mas a captura em regime é rápida. Suba/baixe conforme CPU+RAM.
       # Se ver OOM/crash do Chromium, reduza para 2 (e/ou baixe o shm_size).
@@ -49,6 +55,12 @@ services:
       - hf_jobs:/tmp/hf-jobs
       # Persiste os previews entre restarts
       - hf_previews:/tmp/hf-previews
+      # Cache do catálogo/docs do MCP — evita rebuscar o registry a cada restart.
+      # O volume nomeado recebe uma cópia do cache assado na imagem na primeira
+      # subida e, a partir daí, tem precedência sobre ele. Isso é seguro: o índice
+      # do catálogo é chaveado pela revisão do upstream e os docs têm TTL de 24h,
+      # então conteúdo velho no volume expira sozinho, nunca é servido como novo.
+      - hf_mcp_cache:/opt/hf-mcp-cache
 
     healthcheck:
       test:
@@ -66,3 +78,4 @@ services:
 volumes:
   hf_jobs:
   hf_previews:
+  hf_mcp_cache:
