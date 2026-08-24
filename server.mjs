@@ -182,6 +182,20 @@ async function sweepOldPreviews() {
   }
 }
 
+// Soma o tamanho dos arquivos de um diretório, um nível de recursão por vez.
+// Só para diagnóstico do GET /preview — não vale a pena otimizar.
+async function dirSize(dir) {
+  let total = 0;
+  try {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) total += await dirSize(full);
+      else total += (await stat(full)).size;
+    }
+  } catch {}
+  return total;
+}
+
 // Formato exato de randomUUID(). Usado para validar ids vindos do cliente antes
 // de compô-los num path.
 const UUID_RE =
@@ -416,6 +430,21 @@ app.post(
     const timer = setTimeout(() => killActivePreview(), PREVIEW_TTL_MS);
     activePreview = { proc, previewId, port: actualPort, timer };
 
+    // Se o processo da Studio morrer sozinho (crash, OOM, kill externo), nada
+    // limparia activePreview e o proxy seguiria roteando para uma porta morta —
+    // toda requisição a /, /api/* etc. ficaria pendurada até estourar. Este
+    // handler devolve o servidor ao estado "sem preview ativo", em que o proxy
+    // responde 503 acionável na hora.
+    proc.on("exit", (code, signal) => {
+      if (activePreview?.proc !== proc) return; // já foi substituído/encerrado
+      clearTimeout(activePreview.timer);
+      activePreview = null;
+      app.log.warn(
+        { previewId, code, signal },
+        "Processo da Studio terminou sozinho — preview ativo liberado",
+      );
+    });
+
     app.log.info({ previewId, port: actualPort }, "Preview started");
 
     reply.code(201).send({
@@ -424,6 +453,85 @@ app.post(
       preview_url_direct: directUrl,
       expires_in: "2 horas",
     });
+  },
+);
+
+// ─── GET /preview ─────────────────────────────────────────────────────────────
+// Estado do preview: qual está ativo e o que sobrou em disco. Sem isso não havia
+// como descobrir o preview_id ativo — e o DELETE exige ele — nem saber quais
+// preview_id ainda dão para renderizar.
+app.get(
+  "/preview",
+  {
+    schema: {
+      summary: "Estado do preview ativo e dos diretórios retidos",
+      description:
+        "Retorna o preview ativo (se houver) e a lista de diretórios de preview em disco, " +
+        "com idade e tamanho. Um preview_id listado aqui ainda pode ser renderizado via " +
+        "POST /render, mesmo que o processo da Studio já tenha sido encerrado.",
+      response: {
+        200: {
+          type: "object",
+          properties: {
+            active: {
+              type: "object",
+              nullable: true,
+              properties: {
+                preview_id: { type: "string" },
+                port: { type: "integer" },
+                preview_url: { type: "string" },
+              },
+            },
+            retention_hours: { type: "number" },
+            stored: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  preview_id: { type: "string" },
+                  age_hours: { type: "number" },
+                  size_bytes: { type: "integer" },
+                  renderable: { type: "boolean" },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  async () => {
+    let entries = [];
+    try {
+      entries = await readdir(PREVIEW_DIR);
+    } catch {}
+
+    const stored = [];
+    for (const entry of entries) {
+      if (!UUID_RE.test(entry)) continue;
+      try {
+        const info = await stat(join(PREVIEW_DIR, entry));
+        stored.push({
+          preview_id: entry,
+          age_hours: Math.round(((Date.now() - info.mtimeMs) / 3_600_000) * 10) / 10,
+          size_bytes: await dirSize(join(PREVIEW_DIR, entry)),
+          renderable: true,
+        });
+      } catch {}
+    }
+    stored.sort((a, b) => a.age_hours - b.age_hours);
+
+    return {
+      active: activePreview
+        ? {
+            preview_id: activePreview.previewId,
+            port: activePreview.port,
+            preview_url: studioProxyUrl() ?? PUBLIC_PREVIEW_URL,
+          }
+        : null,
+      retention_hours: PREVIEW_RETENTION_MS / 3_600_000,
+      stored,
+    };
   },
 );
 
@@ -1257,9 +1365,16 @@ if (STUDIO_PROXY_ENABLED) {
   await app.register(async (studio) => {
     await studio.register(import("@fastify/reply-from"), {
       base: `http://127.0.0.1:${PREVIEW_PORT}`,
-      // O SSE de /api/events fica aberto indefinidamente; sem zerar esses
-      // timeouts o undici derruba a conexão e o live-reload da Studio morre.
-      undici: { bodyTimeout: 0, headersTimeout: 0 },
+      undici: {
+        // O SSE de /api/events mantém o CORPO aberto indefinidamente, então
+        // bodyTimeout precisa ser 0. Os HEADERS, porém, chegam de imediato em
+        // qualquer resposta sadia — deixar headersTimeout em 0 também fazia uma
+        // Studio travada pendurar a requisição para sempre.
+        bodyTimeout: 0,
+        headersTimeout: 10_000,
+        // Porta local que não aceita conexão deve falhar na hora, não em 30s.
+        connectTimeout: 2_000,
+      },
     });
 
     // Repassa o corpo cru para o upstream. Encapsulado neste escopo, então o
