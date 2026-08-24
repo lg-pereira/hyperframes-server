@@ -36,6 +36,10 @@ Ponto crítico do desenho: o `html` **continua sendo enviado**. Ele alimenta o I
 
 **Pendente:** medir a taxa de erro do nó `Checar Composição` antes e depois — é a única métrica objetiva de que o MCP melhorou a geração.
 
+### 2026-08-24 — Preview travado em produção
+
+A VPS ficou com `activePreview` apontando para uma Studio que não respondia mais: toda requisição às rotas proxiadas pendurava ~30s e terminava em `ECONNRESET`. Três correções em [server.mjs](../server.mjs): liberar o preview quando o processo morre, separar `headersTimeout` de `bodyTimeout` no proxy, e a rota `GET /preview` para inspecionar o estado.
+
 ---
 
 ## Aprendizados
@@ -96,6 +100,24 @@ O padrão que funcionou nas duas PRs, e que evitou uma regressão real:
 - **Comportamento novo atrás de env var opt-in**, com o valor antigo como padrão (`PUBLIC_BASE_URL`), mais um kill-switch (`STUDIO_PROXY`, `MCP_ENABLED`). Rollback é remover a variável, não fazer deploy.
 - **Bloco de regressão rodando antes** do teste da funcionalidade nova, provando que o fluxo atual está intacto.
 - **Teste de controle**, quando possível: a 3031 continuar falhando ao salvar é o que prova que foi o polyfill que corrigiu, e não outra coisa.
+
+### Processo externo em registro na memória precisa de handler de saída
+
+O servidor guardava o processo da Studio em `activePreview` e roteava o proxy por ele. O `proc.on("exit")` existia, mas só cobria a falha **antes** do preview ficar pronto. Depois disso, se o processo morresse, o registro apodrecia: o proxy seguia mandando tráfego para uma porta morta, indefinidamente, sem erro que ajudasse a diagnosticar.
+
+Sempre que um processo externo entra num registro em memória do qual outra parte do sistema depende, o handler de saída é obrigatório — e precisa ser guardado (`activePreview?.proc !== proc`), senão ele dispara para um processo já substituído e derruba o preview novo.
+
+### Um timeout zerado por um motivo pode travar outro caminho
+
+O `headersTimeout: 0` do proxy tinha sido posto para o SSE do live-reload. Mas SSE precisa apenas que o **corpo** fique aberto: os headers chegam de imediato em qualquer resposta sadia. Zerar os dois transformou "esperar o stream" em "esperar para sempre", e foi o que fez uma Studio travada pendurar cada requisição por 30s.
+
+`bodyTimeout: 0` e `headersTimeout` finito atendem os dois casos. Antes de zerar um timeout, verifique exatamente qual fase ele cobre.
+
+### Estado interno precisa de uma rota que o mostre
+
+O `DELETE /preview/:id` exigia o `preview_id` exato do ativo, e não havia rota que o revelasse. Com o servidor travado, não dava nem para saber o que limpar — o diagnóstico só avançou lendo o código.
+
+Se uma operação exige um identificador, alguma rota tem que devolvê-lo.
 
 ### Cache de conteúdo remoto precisa de um degrau stale
 

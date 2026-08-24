@@ -24,6 +24,7 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 | `POST` | `/lint` | Valida composição sem renderizar (síncrono) | [lint.md](./lint.md) |
 | `POST` | `/check` | Valida composição num browser real: runtime, layout, motion, contraste (síncrono) | [check.md](./check.md) |
 | `POST` | `/preview` | Inicia o studio de preview (editável, salva em disco) | [preview.md](./preview.md) |
+| `GET` | `/preview` | Estado do preview ativo e dos diretórios retidos | [preview.md](./preview.md) |
 | `DELETE` | `/preview/:previewId` | Encerra o preview ativo | [preview.md](./preview.md) |
 | `POST` | `/render` | Renderiza uma composição (`html`) ou as edições salvas na Studio (`preview_id`) | [render.md](./render.md) |
 | `GET` | `/status/:jobId` | Verifica status de um job | [status.md](./status.md) |
