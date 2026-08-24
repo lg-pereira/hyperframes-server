@@ -51,12 +51,16 @@ Tópicos: `data-attributes`, `determinism-rules`, `tracks-and-clips`, `sub-compo
 
 | Argumento | Tipo | Padrão | Descrição |
 |-----------|------|--------|-----------|
-| `query` | string | — | Busca textual em nome, título, descrição e tags |
+| `query` | string | — | Busca ranqueada em nome, título, descrição e tags |
 | `type` | `block` \| `component` | — | Restringe o tipo |
 | `tag` | string | — | Tag exata, ex: `transition` |
 | `limit` | integer | `20` | Máximo de resultados (teto 50) |
 
 **154 blocks** (cenas completas e autossuficientes) e **218 components** (snippets e primitivas de movimento). Devolve só metadados.
+
+A busca é **ranqueada, não exigente**: casar parte da consulta já traz resultado, e o que casa mais aparece antes. Tag exata pesa mais que nome, que pesa mais que título, que pesa mais que descrição. Consultas descritivas funcionam (`"cinematic transition"` → `cinematic-zoom` no topo), mas palavras-chave curtas continuam sendo mais precisas — palavras extras diluem o ranking em vez de estreitá-lo. `tag` aceita plural (`transitions` casa `transition`).
+
+Quando nada casa, a resposta inclui `hint` e `available_tags` com as tags mais populares, para o agente tentar de novo com o vocabulário real em vez de desistir do catálogo.
 
 ### `list_catalog_tags`
 

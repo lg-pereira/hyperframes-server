@@ -115,7 +115,11 @@ export function registerTools(server) {
         "Useful tags: transition, motion-primitive, caption-style, overlay, text-effect, " +
         "reveal, lower-third, typography, background, social. Call list_catalog_tags to see " +
         "everything available. Returns metadata only — call get_catalog_item next for the " +
-        "editable variables, and get_catalog_item_source for the actual code.",
+        "editable variables, and get_catalog_item_source for the actual code.\n\n" +
+        "SEARCH TIPS: the catalog is indexed in English over name, title, description and " +
+        "tags. Prefer SHORT keywords ('transition', 'text reveal', 'lower third') over full " +
+        "sentences — results are ranked, so extra words dilute rather than sharpen the match. " +
+        "When you know the category, `tag` is more precise than `query`.",
       inputSchema: {
         query: z.string().optional().describe("Free-text search over name, title, description and tags"),
         type: z.enum(["block", "component"]).optional().describe("Restrict to blocks or components"),
@@ -126,24 +130,32 @@ export function registerTools(server) {
     async ({ query, type, tag, limit }) => {
       try {
         const out = await searchCatalog({ query, type, tag, limit });
-        return text(
-          withWarning(
-            {
-              total_matches: out.total,
-              showing: out.items.length,
-              items: out.items.map((i) => ({
-                name: i.name,
-                type: i.type,
-                title: i.title,
-                description: i.description,
-                tags: i.tags,
-                dimensions: i.dimensions,
-                duration: i.duration,
-              })),
-            },
-            out,
-          ),
-        );
+        const payload = {
+          total_matches: out.total,
+          showing: out.items.length,
+          items: out.items.map((i) => ({
+            name: i.name,
+            type: i.type,
+            title: i.title,
+            description: i.description,
+            tags: i.tags,
+            dimensions: i.dimensions,
+            duration: i.duration,
+          })),
+        };
+
+        // Lista vazia sem explicação faz o agente repetir a mesma busca ou
+        // desistir do catálogo. Devolver as tags mais populares dá a ele o
+        // vocabulário real para tentar de novo com sentido.
+        if (out.total === 0) {
+          payload.hint =
+            "Nenhum resultado. O catálogo é em inglês e indexa nome, título, descrição e tags. " +
+            "Tente uma palavra-chave mais curta (ex: 'transition' em vez de 'scene transition effect'), " +
+            "ou filtre por uma das tags abaixo.";
+          payload.available_tags = (await listTags({ type })).slice(0, 40);
+        }
+
+        return text(withWarning(payload, out));
       } catch (err) {
         return fail(err);
       }
