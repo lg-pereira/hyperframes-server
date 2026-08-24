@@ -179,22 +179,72 @@ export async function getCatalogIndex() {
  * substring em name/title/description/tags, que é suficiente e não depende de rede
  * extra nem de download de modelo.
  */
+// Normaliza para comparação: minúsculas, sem acento. O catálogo é em inglês, mas
+// normalizar é barato e evita que um acento acidental zere a busca.
+function norm(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+// Palavras curtas e genéricas casam com quase tudo e só embaralham o ranking.
+const STOPWORDS = new Set([
+  "a", "an", "and", "for", "the", "to", "with", "of", "on", "in", "or",
+  "de", "da", "do", "para", "com", "e", "um", "uma", "no", "na",
+]);
+
+/**
+ * Pontua um item contra as palavras da busca.
+ *
+ * Ranqueia em vez de exigir que TODAS as palavras casem. A versão anterior usava
+ * `.every()`, o que zerava a busca inteira quando uma única palavra não aparecia —
+ * um agente pedindo "cinematic transition effect" recebia lista vazia embora
+ * existissem 47 transições. Agora, casar parte da consulta já traz resultado, e o
+ * que casa mais aparece antes.
+ */
+function scoreItem(item, words) {
+  const name = norm(item.name);
+  const title = norm(item.title);
+  const description = norm(item.description);
+  const tags = (item.tags ?? []).map(norm);
+
+  let score = 0;
+  for (const word of words) {
+    // Tag exata é o sinal mais forte: é vocabulário curado, não prosa.
+    if (tags.includes(word)) score += 6;
+    else if (tags.some((t) => t.includes(word))) score += 3;
+    if (name.includes(word)) score += 4;
+    if (title.includes(word)) score += 3;
+    if (description.includes(word)) score += 1;
+  }
+  return score;
+}
+
 export async function searchCatalog({ query, type, tag, limit = 20 } = {}) {
   const { items, ...meta } = await getCatalogIndex();
-  const q = query?.trim().toLowerCase();
-  const t = tag?.trim().toLowerCase();
+  const t = tag ? norm(tag) : null;
 
-  const matched = items.filter((item) => {
+  let pool = items.filter((item) => {
     if (type && item.type !== type) return false;
-    if (t && !(item.tags ?? []).some((x) => String(x).toLowerCase() === t)) return false;
-    if (!q) return true;
-    const hay = [item.name, item.title, item.description, ...(item.tags ?? [])]
-      .join(" ")
-      .toLowerCase();
-    return q.split(/\s+/).every((word) => hay.includes(word));
+    if (!t) return true;
+    const tags = (item.tags ?? []).map(norm);
+    // Tolera plural/singular: o agente pede "transitions", a tag é "transition".
+    return tags.some((x) => x === t || x === `${t}s` || `${x}s` === t);
   });
 
-  return { total: matched.length, items: matched.slice(0, limit), ...meta };
+  const words = [...new Set(norm(query).split(/[^a-z0-9]+/).filter((w) => w.length > 1 && !STOPWORDS.has(w)))];
+
+  if (words.length === 0) {
+    return { total: pool.length, items: pool.slice(0, limit), ...meta };
+  }
+
+  const ranked = pool
+    .map((item) => ({ item, score: scoreItem(item, words) }))
+    .filter((r) => r.score > 0)
+    .sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name));
+
+  return { total: ranked.length, items: ranked.slice(0, limit).map((r) => r.item), ...meta };
 }
 
 /** Todas as tags do catálogo com contagem — ajuda o agente a descobrir o que existe. */
