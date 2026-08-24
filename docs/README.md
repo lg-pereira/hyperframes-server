@@ -23,7 +23,7 @@ Todas as requisições e respostas usam `application/json`, exceto o endpoint de
 | `GET` | `/health` | Status do servidor | [health.md](./health.md) |
 | `POST` | `/lint` | Valida composição sem renderizar (síncrono) | [lint.md](./lint.md) |
 | `POST` | `/check` | Valida composição num browser real: runtime, layout, motion, contraste (síncrono) | [check.md](./check.md) |
-| `POST` | `/preview` | Inicia o studio de preview (editável, salva em disco) | [preview.md](./preview.md) |
+| `POST` | `/preview` | Inicia o studio de preview a partir de `html`, ou **reabre** um preview em disco via `preview_id` | [preview.md](./preview.md) |
 | `GET` | `/preview` | Estado do preview ativo e dos diretórios retidos | [preview.md](./preview.md) |
 | `DELETE` | `/preview/:previewId` | Encerra o preview ativo | [preview.md](./preview.md) |
 | `POST` | `/render` | Renderiza uma composição (`html`) ou as edições salvas na Studio (`preview_id`) | [render.md](./render.md) |
@@ -75,6 +75,8 @@ O ciclo completo, sem reenviar HTML:
          ↓
 4. GET /status/:job_id → GET /download/:job_id
 ```
+
+Se a Studio já tiver sido encerrada (TTL de 2h, `DELETE`, restart) e você quiser voltar a editar, `POST /preview {"preview_id": "..."}` **reabre** o mesmo diretório — mesmo id, edições salvas preservadas. `GET /preview` lista os que ainda estão em disco.
 
 ### Render (assíncrono)
 

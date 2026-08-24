@@ -7,6 +7,8 @@ A composição pode vir de duas formas **mutuamente exclusivas**:
 - **`html`** (com os opcionais `compositions` e `assets`) — envia a composição no corpo da requisição;
 - **`preview_id`** — renderiza o diretório de um preview existente **como ele está no disco**, incluindo o que foi editado e salvo na Studio. Ver [preview.md](./preview.md).
 
+Vale para um preview cuja Studio já foi encerrada: enquanto o diretório estiver em disco (24h), o `preview_id` continua renderizável — e, se você quiser **voltar a editar** antes de renderizar, `POST /preview {"preview_id": ...}` reabre a Studio sobre ele, no mesmo id (ver [preview.md § Reabrir um preview](./preview.md#reabrir-um-preview)).
+
 ## Request
 
 **Method:** `POST`  
