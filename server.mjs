@@ -8,11 +8,13 @@ import {
   stat,
   cp,
   readdir,
+  utimes,
 } from "node:fs/promises";
 import { join, dirname, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { UUID_RE, resolvePreviewSource } from "./preview-source.mjs";
 
 // Binário local do hyperframes — evita que o npx baixe o pacote a cada chamada
 const HF_BIN = fileURLToPath(
@@ -61,6 +63,11 @@ const PREVIEW_RETENTION_MS = parseInt(
   process.env.PREVIEW_RETENTION_MS ?? String(24 * 60 * 60 * 1000),
 );
 
+// Reabertura da Studio sobre um diretório de preview que ainda está em disco
+// (`POST /preview {preview_id}`). Kill-switch: PREVIEW_REOPEN=false devolve o
+// contrato antigo (só `html`) sem deploy de código.
+const PREVIEW_REOPEN_ENABLED = process.env.PREVIEW_REOPEN !== "false";
+
 // Apenas um preview ativo por vez
 let activePreview = null; // { proc, previewId, port, timer }
 
@@ -70,6 +77,19 @@ let activePreview = null; // { proc, previewId, port, timer }
 function studioProxyUrl() {
   if (!STUDIO_PROXY_ENABLED || !PUBLIC_BASE_URL) return null;
   return `${PUBLIC_BASE_URL}/`;
+}
+
+// URLs públicas do preview para a porta REAL do studio, que pode diferir de
+// PREVIEW_PORT se houve conflito no spawn. `direct` é a porta do studio (sem o
+// polyfill de secure context); `preview` é a proxiada por esta porta quando
+// PUBLIC_BASE_URL está definida — a única em que salvar edições funciona fora
+// de HTTPS/localhost. Sem PUBLIC_BASE_URL, `preview` cai em `direct`, que é
+// exatamente o comportamento anterior ao proxy.
+function publicPreviewUrls(port) {
+  const basePublic = PUBLIC_PREVIEW_URL.replace(/:\d+$/, "");
+  const direct =
+    port === PREVIEW_PORT ? PUBLIC_PREVIEW_URL : `${basePublic}:${port}`;
+  return { direct, preview: studioProxyUrl() ?? direct };
 }
 
 // Mata o processo ativo e limpa todos os studios registrados pelo hyperframes.
@@ -196,11 +216,6 @@ async function dirSize(dir) {
   return total;
 }
 
-// Formato exato de randomUUID(). Usado para validar ids vindos do cliente antes
-// de compô-los num path.
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 // Rejeita paths absolutos ou que escapem do diretório de sessão via "..",
 // para impedir escrita fora do previewDir/jobDir (path traversal).
 function assertSafeRelativePath(path) {
@@ -299,17 +314,28 @@ app.post(
   "/preview",
   {
     schema: {
-      summary: "Cria um preview ao vivo da composição",
+      summary: "Cria (ou reabre) um preview ao vivo da composição",
       description:
         "Salva o HTML e assets no disco, spawna `hyperframes preview` e retorna " +
-        "a URL proxiada pelo servidor. O processo expira em 2 horas.",
+        "a URL proxiada pelo servidor. O processo expira em 2 horas.\n\n" +
+        "Aceita a composição de duas formas mutuamente exclusivas: `html` (com os " +
+        "opcionais `compositions`/`assets`), ou `preview_id` — que **reabre** a Studio " +
+        "sobre o diretório de um preview que ainda está em disco, com as edições que " +
+        "foram salvas nele. O id não muda.",
       body: {
         type: "object",
-        required: ["html"],
         properties: {
           html: {
             type: "string",
-            description: "Conteúdo do index.html da composição HyperFrames",
+            description:
+              "Conteúdo do index.html da composição HyperFrames. Mutuamente exclusivo com preview_id.",
+          },
+          preview_id: {
+            type: "string",
+            description:
+              "UUID de um preview ainda retido em disco (ver GET /preview). Reabre a Studio " +
+              "sobre esse diretório, no lugar e com o mesmo id, preservando as edições salvas. " +
+              "Mutuamente exclusivo com html.",
           },
           compositions: {
             type: "array",
@@ -366,13 +392,41 @@ app.post(
             preview_url: { type: "string" },
             preview_url_direct: { type: "string" },
             expires_in: { type: "string" },
+            reused: {
+              type: "boolean",
+              description:
+                "true quando a Studio foi reaberta sobre um diretório existente (preview_id), " +
+                "false quando o preview foi criado do zero a partir de html",
+            },
           },
         },
       },
     },
   },
   async (req, reply) => {
-    const { html, compositions = [], assets = [] } = req.body;
+    const {
+      html,
+      preview_id: previewIdParam,
+      compositions = [],
+      assets = [],
+    } = req.body;
+
+    // O previewId vem do cliente e vira path — só consulta o disco depois de
+    // validado contra o formato exato de randomUUID(), que barra traversal.
+    const source = resolvePreviewSource({
+      html,
+      previewId: previewIdParam,
+      hasExtras: compositions.length > 0 || assets.length > 0,
+      previewDirExists:
+        previewIdParam && UUID_RE.test(previewIdParam)
+          ? existsSync(join(PREVIEW_DIR, previewIdParam))
+          : false,
+      reopenEnabled: PREVIEW_REOPEN_ENABLED,
+    });
+    if (!source.ok) {
+      return reply.code(source.status).send({ error: source.error });
+    }
+    const reused = source.mode === "reuse";
 
     // A Studio usa globalThis.crypto.randomUUID/crypto.subtle ao salvar edições, e o
     // navegador só expõe essas APIs em secure context (HTTPS ou localhost). Servir em
@@ -388,44 +442,65 @@ app.post(
       );
     }
 
+    // Reabrir o preview que JÁ está ativo é no-op: derrubar e respawnar a Studio
+    // embaixo de quem estiver com ela aberta seria pior que não fazer nada. Só o
+    // TTL é renovado, para que o `expires_in` devolvido continue verdadeiro.
+    if (reused && activePreview?.previewId === previewIdParam) {
+      clearTimeout(activePreview.timer);
+      activePreview.timer = setTimeout(
+        () => killActivePreview(),
+        PREVIEW_TTL_MS,
+      );
+      const urls = publicPreviewUrls(activePreview.port);
+      app.log.info(
+        { previewId: previewIdParam },
+        "Preview já estava ativo — devolvido sem respawn (TTL renovado)",
+      );
+      return reply.code(201).send({
+        preview_id: previewIdParam,
+        preview_url: urls.preview,
+        preview_url_direct: urls.direct,
+        expires_in: "2 horas",
+        reused: true,
+      });
+    }
+
     // Encerra qualquer preview anterior e limpa o registry do hyperframes
     await killActivePreview();
 
-    const previewId = randomUUID();
+    const previewId = reused ? previewIdParam : randomUUID();
     const previewDir = join(PREVIEW_DIR, previewId);
-    await mkdir(previewDir, { recursive: true });
 
-    try {
-      await writeCompositionFiles(previewDir, html, compositions);
-      for (const asset of assets) {
-        await saveAsset(previewDir, asset);
+    if (reused) {
+      // Segura a retenção: sweepOldPreviews() só poupa o preview ATIVO, então um
+      // diretório reaberto já perto das 24h seria varrido na passada seguinte —
+      // levando junto as edições feitas nesta sessão.
+      await utimes(previewDir, new Date(), new Date()).catch(() => {});
+    } else {
+      await mkdir(previewDir, { recursive: true });
+      try {
+        await writeCompositionFiles(previewDir, html, compositions);
+        for (const asset of assets) {
+          await saveAsset(previewDir, asset);
+        }
+      } catch (err) {
+        await rm(previewDir, { recursive: true, force: true });
+        return reply.code(400).send({ error: err.message });
       }
-    } catch (err) {
-      await rm(previewDir, { recursive: true, force: true });
-      return reply.code(400).send({ error: err.message });
     }
 
     let proc, actualPort;
     try {
       ({ proc, actualPort } = await spawnPreview(previewDir, PREVIEW_PORT));
     } catch (err) {
-      await rm(previewDir, { recursive: true, force: true });
+      // Apagar só o que este request criou. No reuso o diretório é preexistente:
+      // uma falha de spawn não pode levar embora as edições salvas nele.
+      if (!reused) await rm(previewDir, { recursive: true, force: true });
       return reply.code(500).send({ error: err.message });
     }
 
-    // Reconstrói a URL pública direta (porta do studio) usando a porta real,
-    // que pode diferir de PREVIEW_PORT se houve conflito.
-    const basePublic = PUBLIC_PREVIEW_URL.replace(/:\d+$/, "");
-    const directUrl =
-      actualPort === PREVIEW_PORT
-        ? PUBLIC_PREVIEW_URL
-        : `${basePublic}:${actualPort}`;
-
-    // Com PUBLIC_BASE_URL definida, a URL entregue é a proxiada por esta porta —
-    // é a única em que o polyfill de secure context é injetado, ou seja, a única
-    // em que salvar edições funciona fora de HTTPS/localhost. Sem ela, o valor
-    // continua sendo exatamente o de antes (porta do studio, sem polyfill).
-    const previewUrl = studioProxyUrl() ?? directUrl;
+    const { direct: directUrl, preview: previewUrl } =
+      publicPreviewUrls(actualPort);
 
     const timer = setTimeout(() => killActivePreview(), PREVIEW_TTL_MS);
     activePreview = { proc, previewId, port: actualPort, timer };
@@ -445,13 +520,17 @@ app.post(
       );
     });
 
-    app.log.info({ previewId, port: actualPort }, "Preview started");
+    app.log.info(
+      { previewId, port: actualPort, reused },
+      reused ? "Preview reaberto" : "Preview started",
+    );
 
     reply.code(201).send({
       preview_id: previewId,
       preview_url: previewUrl,
       preview_url_direct: directUrl,
       expires_in: "2 horas",
+      reused,
     });
   },
 );

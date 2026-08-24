@@ -135,6 +135,7 @@ A partir daí, `POST /preview` devolve `preview_url` já apontando para a Studio
 | `PUBLIC_BASE_URL` | *(vazio)* | URL pública da porta 3030. Definida, faz `preview_url` apontar para a Studio proxiada (com polyfill) |
 | `STUDIO_PROXY` | `true` | `false` desliga o proxy e remove as rotas da Studio desta porta — rollback sem deploy de código |
 | `PREVIEW_RETENTION_MS` | `86400000` (24h) | Por quanto tempo os arquivos de um preview sobrevivem, para que `POST /render {preview_id}` possa renderizar as edições salvas |
+| `PREVIEW_REOPEN` | `true` | `false` desliga `POST /preview {preview_id}` (reabrir a Studio sobre um preview em disco) — rollback sem deploy de código |
 
 ### E a porta 3031?
 

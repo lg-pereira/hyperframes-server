@@ -42,6 +42,10 @@ services:
       # Servidor MCP de autoria em /mcp — dá ao agente do n8n acesso ao contrato de
       # composição e ao catálogo de templates. MCP_ENABLED=false desliga.
       - MCP_ENABLED=${MCP_ENABLED:-true}
+      # Reabertura da Studio sobre um preview que ainda está em disco
+      # (POST /preview {preview_id}). PREVIEW_REOPEN=false volta ao contrato
+      # antigo, em que o POST /preview só aceita `html`.
+      - PREVIEW_REOPEN=${PREVIEW_REOPEN:-true}
       # Cache do MCP. Aquecido no build da imagem; o volume abaixo o mantém entre
       # restarts e permite atualizar sem rebuild quando o TTL de 24h vence.
       - MCP_CACHE_DIR=/opt/hf-mcp-cache
