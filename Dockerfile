@@ -58,7 +58,9 @@ RUN npm ci --omit=dev
 # ── Copia o servidor ──────────────────────────────────────────────────────────
 # studio-polyfill.js é lido no boot e injetado no HTML da Studio servida pelo
 # proxy — sem ele, salvar edições quebra fora de HTTPS/localhost.
-COPY server.mjs studio-polyfill.js ./
+# preview-source.mjs é importado por server.mjs no topo: sem ele o processo nem
+# inicia (ERR_MODULE_NOT_FOUND) e o container fica em restart loop.
+COPY server.mjs preview-source.mjs studio-polyfill.js ./
 COPY mcp ./mcp
 COPY scripts ./scripts
 
