@@ -159,6 +159,56 @@ open "$URL"
 
 ---
 
+## GET /preview
+
+Estado do preview: qual está ativo e o que sobrou em disco.
+
+Existe porque o `DELETE` exige o `preview_id` exato do preview ativo — sem esta rota não havia como descobri-lo. Também mostra quais `preview_id` ainda dão para renderizar.
+
+### Request
+
+**Method:** `GET`  
+**Path:** `/preview`
+
+### Response
+
+#### 200 OK
+
+```json
+{
+  "active": {
+    "preview_id": "550e8400-e29b-41d4-a716-446655440000",
+    "port": 3031,
+    "preview_url": "http://meu-servidor.com:3030/"
+  },
+  "retention_hours": 24,
+  "stored": [
+    { "preview_id": "550e8400-...", "age_hours": 0.2, "size_bytes": 4821, "renderable": true },
+    { "preview_id": "7c9e6679-...", "age_hours": 6.4, "size_bytes": 91234, "renderable": true }
+  ]
+}
+```
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `active` | `object \| null` | O preview em execução, ou `null` se não há nenhum |
+| `active.port` | `integer` | Porta real do studio (pode diferir de `PREVIEW_PORT`) |
+| `retention_hours` | `number` | Valor de `PREVIEW_RETENTION_MS` em horas |
+| `stored[]` | `array` | Diretórios de preview em disco, do mais novo para o mais velho |
+| `stored[].renderable` | `boolean` | Se `POST /render` com esse `preview_id` funciona |
+
+**Um `preview_id` listado em `stored` continua renderizável mesmo que o processo do studio já tenha sido encerrado** — os arquivos sobrevivem à morte do processo. É o que permite renderizar uma edição feita horas antes.
+
+### Exemplo cURL
+
+```bash
+# descobrir o preview ativo e encerrá-lo
+PID=$(curl -s http://localhost:3030/preview | jq -r '.active.preview_id')
+curl -X DELETE "http://localhost:3030/preview/$PID?purge=true"
+```
+
+---
+
 ## DELETE /preview/:previewId
 
 Encerra o studio e libera a porta. Por padrão **mantém** os arquivos do preview em disco, para que `POST /render` com `preview_id` ainda consiga renderizar as edições salvas na Studio.
@@ -273,5 +323,6 @@ PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
 - **Porta real pode diferir:** se `PREVIEW_PORT` estiver ocupada, o `hyperframes preview` escolhe outra porta; o servidor parseia a porta real do stdout e reconstrói `preview_url` automaticamente
 - **`--kill-all`:** antes de cada preview, o servidor executa `hyperframes preview --kill-all` para limpar studios zumbis que o processo pai não conseguiu encerrar
 - **TTL:** o processo é encerrado via SIGTERM após 2 horas; use `DELETE` para encerrar antes
+- **Morte inesperada do studio:** se o processo cair sozinho (crash, OOM, kill externo), o servidor detecta a saída, libera o preview ativo e loga um `warn`. As rotas proxiadas voltam a responder `503` na hora, em vez de tentar alcançar uma porta morta. Os arquivos ficam — o `preview_id` segue renderizável
 - **Arquivos sobrevivem ao processo:** encerrar o preview (por TTL, por um novo `POST /preview` ou por `DELETE`) **não** apaga os arquivos. Eles ficam por `PREVIEW_RETENTION_MS` (24h), então o `preview_id` continua renderizável mesmo depois do studio morrer — inclusive o de um preview que foi substituído por outro
 - Uso típico: visualizar e **editar** a composição na Studio, e então chamar `POST /render` com o `preview_id` para gerar o MP4 com as edições

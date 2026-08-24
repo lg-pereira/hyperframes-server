@@ -10,6 +10,7 @@ API REST para renderização de vídeos com [HyperFrames](https://github.com/hey
 | GET | `/docs` | Documentação Swagger interativa |
 | POST | `/lint` | Valida composição sem renderizar (síncrono, < 1s) |
 | POST | `/preview` | Inicia o studio de preview, editável (1 ativo por vez) |
+| GET | `/preview` | Estado do preview ativo e dos diretórios retidos |
 | DELETE | `/preview/:previewId` | Encerra o preview ativo |
 | POST | `/render` | Renderiza uma composição (`html`) ou as edições salvas na Studio (`preview_id`) |
 | GET | `/status/:jobId` | Verifica status do job |
