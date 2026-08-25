@@ -1,4 +1,4 @@
-// As tools que o agente do n8n enxerga.
+// As tools que o agente de IA enxerga.
 //
 // As `description` aqui não são documentação para humanos: são o texto que o modelo
 // lê para decidir qual tool chamar e quando. Por isso ficam em inglês (a língua em

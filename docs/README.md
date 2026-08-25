@@ -121,8 +121,8 @@ echo "Vídeo salvo: video-$JOB_ID.mp4"
 POST /mcp   → tools MCP para um agente consultar antes de gerar HTML
 ```
 
-Expõe o contrato de composição do HyperFrames e o catálogo de 372 templates (transições, efeitos, cenas prontas) como tools MCP. Feito para o nó **MCP Client Tool** do n8n. Ver [mcp.md](./mcp.md).
+Expõe o contrato de composição do HyperFrames e o catálogo de 372 templates (transições, efeitos, cenas prontas) como tools MCP, para qualquer cliente MCP (Claude Code, Claude Desktop, Cursor, nós de automação). Ver [mcp.md](./mcp.md).
 
 ## Deploy
 
-Para instruções de como subir o servidor em produção (Docker Compose, Coolify), veja [deploy.md](./deploy.md).
+Para instruções de como subir o servidor em produção (Docker Compose, Coolify, deploy manual), veja [deploy.md](./deploy.md).

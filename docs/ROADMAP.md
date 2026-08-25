@@ -1,6 +1,6 @@
 # Linha do tempo e aprendizados
 
-Este documento não descreve o funcionamento do servidor — para isso, veja [docs/README.md](README.md) e os arquivos por endpoint. Aqui ficam só **o que mudou, quando** e **o que aprendemos apanhando**, para uma sessão futura não repetir os mesmos erros.
+Este documento não descreve o funcionamento do servidor — para isso, veja [docs/README.md](README.md) e os arquivos por endpoint. Aqui ficam **o que mudou, quando** e **o que se aprendeu apanhando**: as decisões técnicas e as armadilhas encontradas, para quem for mexer no código (ou numa integração parecida) não repetir os mesmos erros.
 
 ---
 
@@ -22,23 +22,17 @@ A Studio passou a ser proxiada pela porta da API, o que criou o ponto de injeç�
 
 Junto veio o fechamento do ciclo: `POST /render` aceita `preview_id`, renderizando o diretório do preview já editado, e os arquivos do preview passaram a ser retidos por 24h em vez de apagados no próximo preview.
 
-### 2026-08-24 — n8n usando `preview_id`
-
-O `preview_id` já era gravado na fila, mas nunca chegava ao corpo do `POST /render` — o fluxo renderizava o HTML antigo e descartava as edições. Corrigido em **quatro** nós de `[Video] Aprovador` (`eW99QxR0gDLYm61i`) e `[Video] Hyperframes Preview` (`jJArK7nS7xu2FjQo`): `Montar Chamada Render`, `Montar Manifesto`, `Usar HTML Existente` e `Solicitar Render`.
-
-Ponto crítico do desenho: o `html` **continua sendo enviado**. Ele alimenta o IF `Tem HTML Pronto?`, cujo ramo falso re-gera o vídeo inteiro com IA. Quem escolhe entre `preview_id` e `html` é o ternário do `Solicitar Render`, no corpo HTTP — não o roteamento.
-
-**Pendente:** o remendo em `Montar Retorno` que troca `localhost` por IP na `preview_url` pode sair quando `PUBLIC_BASE_URL` estiver definida.
-
 ### 2026-08-24 — MCP de autoria ([PR #2](https://github.com/lg-pereira/hyperframes-server/pull/2))
 
-`POST /mcp` expõe o contrato de composição e o catálogo de 372 templates como tools MCP, para o agente do n8n consultar antes de gerar HTML. Ver [docs/mcp.md](mcp.md).
+`POST /mcp` expõe o contrato de composição e o catálogo de 372 templates como tools MCP, para um agente de IA consultar antes de gerar HTML — em vez de escrever animação de cabeça. Ver [docs/mcp.md](mcp.md).
 
-**Pendente:** medir a taxa de erro do nó `Checar Composição` antes e depois — é a única métrica objetiva de que o MCP melhorou a geração.
+### 2026-08-24 — Preview travado em produção ([PR #5](https://github.com/lg-pereira/hyperframes-server/pull/5))
 
-### 2026-08-24 — Preview travado em produção
+Um servidor em produção ficou com `activePreview` apontando para uma Studio que não respondia mais: toda requisição às rotas proxiadas pendurava ~30s e terminava em `ECONNRESET`. Três correções em [server.mjs](../server.mjs): liberar o preview quando o processo morre, separar `headersTimeout` de `bodyTimeout` no proxy, e a rota `GET /preview` para inspecionar o estado.
 
-A VPS ficou com `activePreview` apontando para uma Studio que não respondia mais: toda requisição às rotas proxiadas pendurava ~30s e terminava em `ECONNRESET`. Três correções em [server.mjs](../server.mjs): liberar o preview quando o processo morre, separar `headersTimeout` de `bodyTimeout` no proxy, e a rota `GET /preview` para inspecionar o estado.
+### 2026-08-25 — Reabrir um preview ([PR #6](https://github.com/lg-pereira/hyperframes-server/pull/6))
+
+Os arquivos de um preview sobreviviam 24h ao processo da Studio, mas só podiam ser **renderizados**: não havia rota para voltar a vê-los ou editá-los. `POST /preview` passou a aceitar `preview_id` além de `html` e reabre a Studio sobre o diretório existente — no lugar, mesmo id, edições preservadas. Kill-switch: `PREVIEW_REOPEN=false`.
 
 ---
 
@@ -46,19 +40,19 @@ A VPS ficou com `activePreview` apontando para uma Studio que não respondia mai
 
 ### "O bundle de terceiros não tem fallback" não significa que não dá para consertar
 
-Este custou **semanas**. O roadmap afirmava que o save da Studio só se resolveria com HTTPS no Coolify, porque o bundle não expõe fallback nos dois call sites. A conclusão estava errada, e o passo de infra ficou parado enquanto os erros seguiam em produção.
+Este custou **semanas**. O roadmap afirmava que o save da Studio só se resolveria colocando HTTPS na frente do servidor, porque o bundle não expõe fallback nos dois call sites. A conclusão estava errada, e o passo de infra ficou parado enquanto os erros seguiam em produção.
 
 O que faltava não era TLS, era um **ponto de injeção**. Nada obriga o servidor a entregar o HTML de terceiros sem tocá-lo: proxiando, dá para injetar um `<script>` que roda antes do bundle.
 
 > A falta de fallback limita o que dá para consertar **dentro** do bundle — não o que dá para consertar no caminho até o navegador.
 
-Quando um documento disser "só dá para resolver com infra", desconfie e procure onde o controle ainda é nosso.
+Quando um documento disser "só dá para resolver com infra", desconfie e procure onde o controle ainda é seu.
 
 ### Leia o formato cru, não a saída normalizada do CLI
 
 O `hyperframes catalog --json` devolve itens com `tags`, `title` e `type: "block"`. O `registry.json` real é um índice fino: só `name` e `type`, prefixado (`hyperframes:block`), sem tags. O CLI normaliza e hidrata.
 
-Duas suposições erradas viraram bugs por eu ter olhado a saída bonita em vez do arquivo de origem. Ao integrar com um formato de terceiros, busque o arquivo cru.
+Duas suposições erradas viraram bugs por se ter olhado a saída bonita em vez do arquivo de origem. Ao integrar com um formato de terceiros, busque o arquivo cru.
 
 ### Idade de cache pode ser negativa
 
@@ -70,31 +64,33 @@ Foi um bug não determinístico — passou num script e falhou noutro, o que foi
 
 O Node só envia os headers da resposta quando sai o primeiro byte de corpo. Um endpoint SSE que fica calado até algum evento acontecer (como o `/api/events` da Studio) deixa o `EventSource` do navegador pendurado esperando headers que nunca chegam — e o live-reload simplesmente não conecta.
 
-O servidor original fazia esse flush sozinho. Ao proxiar, virou responsabilidade nossa: `reply.raw.flushHeaders()`.
+O servidor original fazia esse flush sozinho. Ao proxiar, ele passa a ser responsabilidade de quem proxia: `reply.raw.flushHeaders()`.
 
 No mesmo caminho: force `accept-encoding: identity` quando for transformar o corpo, senão a injeção cai em cima de bytes comprimidos.
 
-### Nós de código do n8n descartam campos silenciosamente
+### Pipelines que remontam objetos campo a campo descartam campos silenciosamente
 
-Nós que remontam o objeto campo a campo (`return [{ json: { a: x.a, b: x.b } }]`) perdem qualquer campo novo, sem erro nem aviso. Ao propagar um campo por um fluxo, é preciso percorrer **todos** os nós de código do caminho — foram quatro, não dois, e os dois que faltavam eram invisíveis até rastrear o dado ponta a ponta.
+Um passo que reconstrói o payload explicitamente (`{ a: x.a, b: x.b }`) perde qualquer campo novo, sem erro nem aviso. É o padrão em ferramentas de automação com nós de código, mas vale para qualquer camada de transformação.
+
+Ao propagar um campo novo (como o `preview_id`) por um pipeline, percorra **todos** os passos do caminho: numa integração real foram quatro, não dois, e os dois que faltavam só apareceram rastreando o dado ponta a ponta.
 
 ### Não silencie um aviso de validação para "passar"
 
-Ao montar uma composição de teste, o `hyperframes check` acusou sobreposição de texto no crossfade. Silenciei com `data-layout-allow-overlap` e segui. O snapshot mostrou que o checker estava certo: os dois títulos ficavam legíveis ao mesmo tempo na mesma posição, virando um borrão.
+Ao montar uma composição de teste, o `hyperframes check` acusou sobreposição de texto no crossfade. O aviso foi silenciado com `data-layout-allow-overlap` — e o snapshot mostrou que o checker estava certo: os dois títulos ficavam legíveis ao mesmo tempo na mesma posição, virando um borrão.
 
 Esse atributo existe para sobreposição **intencional**. Usá-lo para calar um achado legítimo esconde o defeito e ainda desativa outras checagens na subárvore. A correção certa era o timing.
 
 (Outro detalhe do contrato: `data-start="0"` é obrigatório na raiz — o `lint` reprova sem ele, embora o exemplo mínimo da skill o omita.)
 
-### O MP4 só pode ser validado na VPS
+### Sem ffmpeg local, o MP4 não é validável localmente
 
-A máquina de desenvolvimento não tem ffmpeg/ffprobe. `POST /render` sempre falha localmente com "FFmpeg not found", mesmo com todo o resto correto.
+`POST /render` falha com "FFmpeg not found" numa máquina sem ffmpeg/ffprobe, mesmo com todo o resto correto — e é fácil confundir isso com um defeito da composição. O container do `Dockerfile` já traz Chromium e FFmpeg; fora dele, instale os dois ou renderize num ambiente que os tenha.
 
-Valide localmente o que der (`npm test`, `lint`, `check`, `snapshot`, os endpoints) e **diga explicitamente** que o MP4 ficou pendente — não afirme que o render funciona sem ter visto.
+Valide localmente o que der (`npm test`, `/lint`, `/check`, `/preview`, os endpoints de estado) e **diga explicitamente** que o MP4 ficou pendente — não afirme que o render funciona sem ter visto.
 
 ### Mudanças aditivas, opt-in, com regressão testada primeiro
 
-O padrão que funcionou nas duas PRs, e que evitou uma regressão real:
+O padrão que funcionou nas PRs deste repositório, e que evitou uma regressão real:
 
 - **Rotas explícitas, nunca catch-all.** A primeira proposta do proxy da Studio usava catch-all na porta da API; isso faria toda rota inexistente devolver o HTML do SPA em vez do 404 JSON do Fastify.
 - **Comportamento novo atrás de env var opt-in**, com o valor antigo como padrão (`PUBLIC_BASE_URL`), mais um kill-switch (`STUDIO_PROXY`, `MCP_ENABLED`). Rollback é remover a variável, não fazer deploy.
@@ -118,6 +114,14 @@ O `headersTimeout: 0` do proxy tinha sido posto para o SSE do live-reload. Mas S
 O `DELETE /preview/:id` exigia o `preview_id` exato do ativo, e não havia rota que o revelasse. Com o servidor travado, não dava nem para saber o que limpar — o diagnóstico só avançou lendo o código.
 
 Se uma operação exige um identificador, alguma rota tem que devolvê-lo.
+
+### Dado que sobrevive ao processo precisa de um caminho de volta
+
+Os arquivos do preview passaram a ser retidos por 24h para que `POST /render {preview_id}` renderizasse as edições salvas. Só que a única porta para aquele diretório era o render: com a Studio encerrada, não dava mais para **ver** nem editar o que estava lá — e recuperar significava reenviar o HTML original, descartando justamente as edições que a retenção existia para preservar.
+
+Ao decidir reter um dado além da vida do processo que o criou, pergunte quais operações ele ainda precisa aceitar depois. Reter só para uma delas cria um estado semi-acessível, que parece perda de dados para quem usa.
+
+Na implementação, dois detalhes fizeram diferença: o caminho de reabertura **não** pode compartilhar a limpeza de erro do caminho de criação (apagar o diretório num spawn que falhou destruiria as edições), e reabrir precisa renovar o relógio da retenção, senão a varredura leva o diretório no meio da sessão.
 
 ### Cache de conteúdo remoto precisa de um degrau stale
 

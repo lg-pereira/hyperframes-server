@@ -41,10 +41,12 @@ docker compose up -d --build
 
 | Configuração | Valor | Motivo |
 |-------------|-------|--------|
-| `shm_size: 2gb` | 2 GB de memória compartilhada | Obrigatório para o Chromium não crashar em composições grandes |
+| `shm_size: 4gb` | Memória compartilhada | Obrigatório para o Chromium não crashar em composições grandes. Com poucos workers de render, 2 GB costumam bastar |
 | `init: true` | Habilita init process | Evita processos zumbi do Chromium (PID 1) |
 | `restart: unless-stopped` | Reinicia automaticamente | Recuperação de crashes sem intervenção manual |
 | `volumes: hf_jobs` | Volume persistente | Jobs em andamento sobrevivem a restarts do container |
+| `volumes: hf_previews` | Volume persistente | Previews retidos (24h) sobrevivem a restarts — é o que mantém `preview_id` renderizável e reabrível |
+| `volumes: hf_mcp_cache` | Volume persistente | Cache do MCP de autoria, aquecido no build; evita a primeira chamada lenta |
 | `healthcheck` | `GET /health` a cada 30s | Monitoramento automático pelo Docker |
 
 ### Variáveis de ambiente configuradas automaticamente
@@ -54,6 +56,27 @@ docker compose up -d --build
 | `NODE_ENV` | `production` | Modo de produção do Node.js |
 | `PUPPETEER_SKIP_CHROMIUM_DOWNLOAD` | `true` | Evita baixar Chromium do npm (já instalado no sistema) |
 | `PUPPETEER_EXECUTABLE_PATH` | `/usr/bin/chromium` | Aponta para o Chromium do sistema |
+| `HYPERFRAMES_PREVIEW_HOST` | `0.0.0.0` | A Studio faz bind em `127.0.0.1` por padrão, o que a torna inalcançável pelo port-mapping do Docker |
+
+### Todas as variáveis de ambiente
+
+Nenhuma é obrigatória — o servidor sobe com os padrões. Esta é a referência completa; cada uma é detalhada no documento do endpoint correspondente.
+
+| Variável | Padrão | Descrição |
+|----------|--------|-----------|
+| `PUBLIC_BASE_URL` | *(vazio)* | URL pública da porta 3030. Definida, faz `preview_url` apontar para a Studio proxiada, com o polyfill que permite salvar em HTTP puro |
+| `PUBLIC_PREVIEW_URL` | `http://localhost:3031` | URL pública da porta do studio, devolvida em `preview_url_direct` |
+| `PREVIEW_PORT` | `3031` | Porta em que o studio escuta |
+| `STUDIO_PROXY` | `true` | `false` desliga o proxy da Studio nesta porta |
+| `PREVIEW_REOPEN` | `true` | `false` desliga `POST /preview {preview_id}` (reabrir um preview em disco) |
+| `PREVIEW_RETENTION_MS` | `86400000` (24h) | Por quanto tempo os arquivos de um preview sobrevivem ao processo da Studio |
+| `RENDER_WORKERS` | `auto` (`4` no compose) | Workers paralelos por render. Ajuste conforme cores e RAM |
+| `MCP_ENABLED` | `true` | `false` remove as rotas `/mcp` |
+| `MCP_CACHE_DIR` | `/tmp/hf-mcp-cache` | Onde o catálogo e os docs do MCP são cacheados |
+| `MCP_CACHE_TTL_MS` | `86400000` (24h) | Validade do cache de documentos do MCP |
+| `MCP_MAX_SOURCE_BYTES` | `40000` | Teto do retorno de `get_catalog_item_source` |
+
+Os quatro kill-switches (`STUDIO_PROXY`, `PREVIEW_REOPEN`, `MCP_ENABLED` e a ausência de `PUBLIC_BASE_URL`) existem para rollback **sem deploy de código**: basta mudar a variável e reiniciar.
 
 ## Coolify
 
@@ -115,7 +138,7 @@ O SHA-256 do polyfill é verificado contra `node:crypto` em `npm test` — se el
 Defina `PUBLIC_BASE_URL` com a URL pública **da porta 3030**:
 
 ```
-PUBLIC_BASE_URL=http://meu-vps.com:3030
+PUBLIC_BASE_URL=http://<seu-host>:3030
 ```
 
 A partir daí, `POST /preview` devolve `preview_url` já apontando para a Studio proxiada (com polyfill). O campo `preview_url_direct` continua trazendo a URL da 3031, para diagnóstico.
@@ -200,7 +223,8 @@ curl http://localhost:3030/health
 
 ## Notas de produção
 
-- **Armazenamento temporário:** jobs ficam em `/tmp/hf-jobs/` e são deletados 60s após o download. Não use para armazenamento permanente.
+- **Sem autenticação.** Nenhuma rota exige credencial — a API pressupõe rede confiável (rede interna, VPN ou um reverse proxy que faça a autenticação). Não exponha as portas 3030/3031 na internet aberta: `POST /render` e `POST /preview` executam Chromium e escrevem em disco, e `assets[].url` faz o servidor buscar URLs arbitrárias.
+- **Armazenamento temporário:** jobs ficam em `/tmp/hf-jobs/` e são deletados 60s após o download. Previews ficam em `/tmp/hf-previews/` e são varridos após `PREVIEW_RETENTION_MS` (24h). Nenhum dos dois serve como armazenamento permanente.
 - **Concorrência:** múltiplos jobs rodam em paralelo, cada um como processo separado. Monitore uso de CPU e memória com composições pesadas.
 - **Timeout:** cada job tem timeout de 10 minutos — composições muito longas ou complexas podem falhar.
 - **Logs:** o servidor usa Pino com pretty-print. Em produção, redirecione stdout para um agregador de logs.
