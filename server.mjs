@@ -27,7 +27,7 @@ const PREVIEW_DIR = "/tmp/hf-previews";
 
 // Nº de workers do render. O `auto` do hyperframes calibra a frio e tende a escolher
 // 1 worker mesmo quando a captura em regime é rápida. Em ARM (modo screenshot) compensa
-// fixar conforme os cores disponíveis. Ajuste via env RENDER_WORKERS no Coolify.
+// fixar conforme os cores disponíveis. Ajuste via env RENDER_WORKERS.
 const RENDER_WORKERS = process.env.RENDER_WORKERS ?? "auto";
 
 // TTL dos previews em ms (padrão: 2 horas)
@@ -36,7 +36,7 @@ const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
 // Porta dedicada ao studio hyperframes preview.
 // Deve ser exposta no docker-compose e acessível de fora do container.
 // PUBLIC_PREVIEW_URL é a URL base pública para o browser acessar essa porta.
-// Ex: PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
+// Ex: PUBLIC_PREVIEW_URL=http://seu-host:3031
 const PREVIEW_PORT = parseInt(process.env.PREVIEW_PORT ?? "3031");
 const PUBLIC_PREVIEW_URL = (
   process.env.PUBLIC_PREVIEW_URL ?? `http://localhost:${PREVIEW_PORT}`
@@ -46,13 +46,13 @@ const PUBLIC_PREVIEW_URL = (
 // É o que resolve o bug de save: proxiando a Studio por aqui o servidor consegue
 // injetar o polyfill de secure context no HTML dela (ver studio-polyfill.js).
 // Enquanto NÃO estiver definida, `preview_url` continua apontando para a 3031
-// exatamente como antes — a migração é opt-in. Ex: PUBLIC_BASE_URL=http://meu-vps.com:3030
+// exatamente como antes — a migração é opt-in. Ex: PUBLIC_BASE_URL=http://seu-host:3030
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL ?? "").replace(/\/$/, "");
 
 // Desliga o proxy da Studio sem precisar de deploy de código (rollback por env var).
 const STUDIO_PROXY_ENABLED = process.env.STUDIO_PROXY !== "false";
 
-// Servidor MCP de autoria em /mcp — dá ao agente de IA (n8n) acesso ao contrato de
+// Servidor MCP de autoria em /mcp — dá a um agente de IA acesso ao contrato de
 // composição e ao catálogo de templates do HyperFrames. Desligável por env var.
 const MCP_ENABLED = process.env.MCP_ENABLED !== "false";
 
@@ -1574,7 +1574,7 @@ if (STUDIO_PROXY_ENABLED) {
 
 // ─── MCP de autoria ───────────────────────────────────────────────────────────
 // Expõe o contrato de composição e o catálogo de templates do HyperFrames como
-// tools MCP, para o agente do n8n consultar antes de gerar HTML de cena.
+// tools MCP, para um agente de IA consultar antes de gerar HTML de cena.
 // Aditivo: /mcp não existe em nenhuma rota anterior, e o plugin é encapsulado.
 if (MCP_ENABLED) {
   await app.register(import("./mcp/index.mjs"), { prefix: "/mcp" });

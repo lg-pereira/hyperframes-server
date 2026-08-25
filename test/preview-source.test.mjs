@@ -1,8 +1,8 @@
 // Prova a decisão de fonte do POST /preview: html (comportamento de sempre) vs
 // preview_id (reabrir a Studio sobre um diretório já em disco).
 //
-// O bloco de regressão vem primeiro: o caminho `html` é o que o n8n usa em
-// produção e não pode mudar de forma por causa da reabertura. Depois vêm as
+// O bloco de regressão vem primeiro: o caminho `html` é o caminho de sempre e
+// não pode mudar de forma por causa da reabertura. Depois vêm as
 // guardas do caminho novo — em especial o preview_id fora do formato UUID, que é
 // o que impede um id do cliente de virar path traversal no PREVIEW_DIR.
 //

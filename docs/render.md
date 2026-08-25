@@ -99,11 +99,11 @@ Os arquivos de um preview sobrevivem por `PREVIEW_RETENTION_MS` (padrão 24h) me
   "assets": [
     {
       "filename": "narration.mp3",
-      "url": "https://meu-bucket.com/narration.mp3"
+      "url": "https://cdn.exemplo.com/narration.mp3"
     },
     {
       "filename": "logo.png",
-      "url": "https://meu-bucket.com/logo.png"
+      "url": "https://cdn.exemplo.com/logo.png"
     }
   ],
   "fps": 30
@@ -156,7 +156,7 @@ Job criado com sucesso. O processamento ocorre em background.
 Retornado quando um asset não tem `base64` nem `url`, o download da `url` falha (HTTP não-2xx, DNS, timeout etc), ou algum `compositions[].path`/`assets[].filename` é inválido (absoluto ou contendo `..`). Nenhum job é criado — o `jobDir` é limpo antes de responder.
 
 ```json
-{ "error": "Falha ao baixar asset \"logo.png\" de https://meu-bucket.com/logo.png: HTTP 404" }
+{ "error": "Falha ao baixar asset \"logo.png\" de https://cdn.exemplo.com/logo.png: HTTP 404" }
 ```
 
 ```json
@@ -240,7 +240,7 @@ curl -X POST http://localhost:3030/render \
     "html": "<div data-width=\"1920\" data-height=\"1080\"><img src=\"logo.png\"/></div>",
     "assets": [{
       "filename": "logo.png",
-      "url": "https://meu-bucket.com/logo.png"
+      "url": "https://cdn.exemplo.com/logo.png"
     }],
     "fps": 30
   }'

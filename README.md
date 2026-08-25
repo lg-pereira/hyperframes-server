@@ -2,6 +2,28 @@
 
 API REST para renderização de vídeos com [HyperFrames](https://github.com/heygen-com/hyperframes) (Chromium + FFmpeg), construída com Fastify.
 
+Você manda o HTML de uma composição; o servidor valida, abre um preview editável no navegador e devolve um MP4. Toda a documentação está em português, na pasta [`docs/`](./docs/).
+
+## Começando
+
+Requer **Docker** (a imagem já traz Chromium e FFmpeg):
+
+```bash
+docker compose up -d
+curl http://localhost:3030/health
+```
+
+Sem Docker, é preciso Node.js 22+, Chromium e FFmpeg no sistema:
+
+```bash
+npm install
+npm start
+```
+
+O servidor sobe em `http://localhost:3030`, com o Swagger em `/docs`. Nenhuma variável de ambiente é obrigatória — veja [docs/deploy.md](./docs/deploy.md) para produção e para a lista completa.
+
+> **Atenção:** a API não tem autenticação. Rode em rede confiável ou atrás de um proxy que autentique.
+
 ## Endpoints
 
 | Método | Rota | Descrição |
@@ -9,6 +31,7 @@ API REST para renderização de vídeos com [HyperFrames](https://github.com/hey
 | GET | `/health` | Status do servidor |
 | GET | `/docs` | Documentação Swagger interativa |
 | POST | `/lint` | Valida composição sem renderizar (síncrono, < 1s) |
+| POST | `/check` | Valida num Chromium real: runtime, layout, motion, contraste (síncrono) |
 | POST | `/preview` | Inicia o studio de preview a partir de `html`, ou reabre um preview em disco (`preview_id`) — 1 ativo por vez |
 | GET | `/preview` | Estado do preview ativo e dos diretórios retidos |
 | DELETE | `/preview/:previewId` | Encerra o preview ativo |
@@ -16,7 +39,7 @@ API REST para renderização de vídeos com [HyperFrames](https://github.com/hey
 | GET | `/status/:jobId` | Verifica status do job |
 | GET | `/download/:jobId` | Baixa o MP4 gerado |
 | GET | `/logs/:jobId` | Log do processo render (diagnóstico) |
-| POST | `/mcp` | Servidor MCP: contrato e catálogo de templates para o agente de IA |
+| POST | `/mcp` | Servidor MCP: contrato e catálogo de templates para um agente de IA |
 
 ## Uso rápido
 
@@ -89,7 +112,7 @@ curl -X POST http://localhost:3030/render \
     "assets": [
       {
         "filename": "logo.png",
-        "url": "https://meu-bucket.com/logo.png"
+        "url": "https://cdn.exemplo.com/logo.png"
       }
     ],
     "fps": 30
@@ -104,14 +127,16 @@ Ver pasta [`docs/`](./docs/) para a referência completa da API e guia de deploy
 
 - [docs/README.md](./docs/README.md) — Visão geral e fluxos
 - [docs/lint.md](./docs/lint.md) — `POST /lint`
-- [docs/preview.md](./docs/preview.md) — `POST /preview`, `DELETE /preview/:id`
+- [docs/check.md](./docs/check.md) — `POST /check`
+- [docs/preview.md](./docs/preview.md) — `POST /preview` (criar e reabrir), `GET /preview`, `DELETE /preview/:id`
 - [docs/logs.md](./docs/logs.md) — `GET /logs/:jobId`
 - [docs/render.md](./docs/render.md) — `POST /render`
 - [docs/status.md](./docs/status.md) — `GET /status/:jobId`
 - [docs/download.md](./docs/download.md) — `GET /download/:jobId`
 - [docs/health.md](./docs/health.md) — `GET /health`
 - [docs/mcp.md](./docs/mcp.md) — `POST /mcp` (servidor MCP de autoria)
-- [docs/deploy.md](./docs/deploy.md) — Deploy (Docker Compose, Coolify)
+- [docs/deploy.md](./docs/deploy.md) — Deploy (Docker Compose, Coolify, manual) e variáveis de ambiente
+- [docs/ROADMAP.md](./docs/ROADMAP.md) — Linha do tempo das mudanças e aprendizados
 
 ## Stack
 
@@ -119,3 +144,15 @@ Ver pasta [`docs/`](./docs/) para a referência completa da API e guia de deploy
 - **Framework**: Fastify 4
 - **Renderer**: HyperFrames CLI (Chromium headless + FFmpeg)
 - **Docs**: Swagger UI em `/docs`
+
+## Testes
+
+```bash
+npm test
+```
+
+Testes unitários sem rede obrigatória, cobrindo o polyfill de secure context, a resolução de fonte do `POST /preview` e o cache/busca do servidor MCP.
+
+## Licença
+
+MIT — veja [LICENSE](./LICENSE).

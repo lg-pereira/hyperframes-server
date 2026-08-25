@@ -2,7 +2,7 @@
 
 Servidor **MCP (Model Context Protocol)** que dá ao agente de IA acesso ao contrato de composição do HyperFrames e ao catálogo de templates — para ele consultar as regras e reaproveitar transições, efeitos e cenas prontas em vez de escrever animação de cabeça.
 
-Feito para o nó **MCP Client Tool** do n8n, mas funciona com qualquer cliente MCP.
+Funciona com **qualquer cliente MCP** — Claude Code, Claude Desktop, Cursor, o nó *MCP Client Tool* do n8n, ou um cliente próprio falando JSON-RPC.
 
 **Endpoint:** `POST /mcp` · **Transporte:** Streamable HTTP (stateless) · **Auth:** nenhuma
 
@@ -16,18 +16,39 @@ Este servidor resolve outro problema: **referência de autoria**. O agente pergu
 
 ---
 
-## Configurar no n8n
+## Conectar um cliente
 
-Adicione um nó **MCP Client Tool** conectado ao seu AI Agent:
+O endpoint é `POST http://<host>:3030/mcp`, transporte **Streamable HTTP**, sem autenticação.
+
+**Clientes que leem `mcpServers` (Claude Code, Claude Desktop, Cursor, …):**
+
+```json
+{
+  "mcpServers": {
+    "hyperframes-authoring": {
+      "type": "http",
+      "url": "http://<host>:3030/mcp"
+    }
+  }
+}
+```
+
+No Claude Code dá para fazer pela CLI:
+
+```bash
+claude mcp add --transport http hyperframes-authoring http://<host>:3030/mcp
+```
+
+**Clientes de automação com nó de MCP** (ex.: *MCP Client Tool* do n8n) pedem os mesmos dados em campos:
 
 | Campo | Valor |
 |-------|-------|
-| `endpointUrl` | `http://<host>:3030/mcp` |
-| `serverTransport` | `httpStreamable` (default) |
-| `authentication` | `none` |
-| `include` | `all` |
+| Endpoint | `http://<host>:3030/mcp` |
+| Transporte | Streamable HTTP (**não** SSE) |
+| Autenticação | nenhuma |
+| Tools a incluir | todas |
 
-A lista de tools carrega sozinha na UI. Se não carregar, veja [Troubleshooting](#troubleshooting).
+A lista de tools é descoberta pelo próprio protocolo. Se não carregar, veja [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -64,7 +85,7 @@ Quando nada casa, a resposta inclui `hint` e `available_tags` com as tags mais p
 
 ### `list_catalog_tags`
 
-Todas as tags com contagem, para o agente descobrir o que existe. As mais úteis:
+Todas as tags com contagem, para o agente descobrir o que existe. As mais frequentes:
 
 `motion-primitive(111)` · `transition(47)` · `overlay(40)` · `typography(40)` · `reveal(26)` · `caption-style(16)` · `lower-third(13)`
 
@@ -145,7 +166,7 @@ As respostas vêm como SSE (`event: message` / `data: {...}`), mesmo em chamadas
 
 ## Troubleshooting
 
-**As tools não carregam no n8n.** Confirme `serverTransport=httpStreamable` (não `sse`) e que a URL termina em `/mcp`. Teste o `initialize` por curl a partir da mesma rede do n8n.
+**O cliente não lista as tools.** Confirme o transporte **Streamable HTTP** (não `sse`) e que a URL termina em `/mcp`. Teste o `initialize` por curl a partir da mesma rede do cliente — se o curl responde e o cliente não, o problema é a configuração dele.
 
 **`404` em `/mcp`.** `MCP_ENABLED=false` no ambiente.
 
@@ -157,6 +178,6 @@ As respostas vêm como SSE (`event: message` / `data: {...}`), mesmo em chamadas
 
 ## Notas
 
-- **Sem autenticação**, igual ao resto da API (rede Tailscale). O MCP Client Tool do n8n suporta `bearerAuth`/`headerAuth` se vocês quiserem fechar depois — é trocar a opção no nó e adicionar a checagem em [mcp/index.mjs](../mcp/index.mjs).
+- **Sem autenticação**, igual ao resto da API: o servidor pressupõe rede confiável (VPN, rede interna ou reverse proxy à frente). Não exponha `/mcp` na internet aberta sem uma camada de auth. Para fechar, a maioria dos clientes MCP suporta `bearerAuth`/`headerAuth` — do lado do servidor, a checagem entra em [mcp/index.mjs](../mcp/index.mjs).
 - **Stateless:** cada requisição cria e descarta seu próprio `McpServer` e transport. Não há sessão para expirar nem estado entre chamadas.
 - **Sem validação de composição** por ora. É a adição mais óbvia depois — o `POST /lint` e o `POST /check` já existem e permitiriam ao agente se autocorrigir antes de renderizar.

@@ -1,6 +1,6 @@
 // Prova o degrau stale-while-error do cache do MCP.
 //
-// É o degrau que importa em produção: se o GitHub cair, o agente do n8n precisa
+// É o degrau que importa em produção: se o GitHub cair, o agente de IA precisa
 // receber conteúdo levemente velho com um aviso, e não um erro que trava a geração
 // da cena. Também cobre a regressão do clamp de idade negativa — um mtime à frente
 // do relógio fazia a entrada parecer "mais fresca que agora" e nunca expirar.

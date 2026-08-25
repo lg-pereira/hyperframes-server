@@ -2,7 +2,7 @@
 //
 // A primeira versão exigia que TODAS as palavras da consulta casassem
 // (`.every()`), o que zerava a busca inteira quando uma única palavra não
-// aparecia: o agente do n8n pedia "cinematic transition effect" e recebia lista
+// aparecia: o agente pedia "cinematic transition effect" e recebia lista
 // vazia, embora existissem 47 transições. Agora é ranqueamento por pontuação.
 //
 // Rodar com: npm test

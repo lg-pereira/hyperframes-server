@@ -98,7 +98,7 @@ Com `preview_id`, `compositions` e `assets` **não podem ser reenviados** (`400`
   "assets": [
     {
       "filename": "logo.png",
-      "url": "https://meu-bucket.com/logo.png"
+      "url": "https://cdn.exemplo.com/logo.png"
     }
   ]
 }
@@ -111,8 +111,8 @@ Com `preview_id`, `compositions` e `assets` **não podem ser reenviados** (`400`
 ```json
 {
   "preview_id": "550e8400-e29b-41d4-a716-446655440000",
-  "preview_url": "http://meu-servidor.com:3030/",
-  "preview_url_direct": "http://meu-servidor.com:3031",
+  "preview_url": "http://<seu-host>:3030/",
+  "preview_url_direct": "http://<seu-host>:3031",
   "expires_in": "2 horas",
   "reused": false
 }
@@ -135,7 +135,7 @@ Retornado quando: nem `html` nem `preview_id` foi informado (ou os dois juntos);
 ```
 
 ```json
-{ "error": "Falha ao baixar asset \"logo.png\" de https://meu-bucket.com/logo.png: HTTP 404" }
+{ "error": "Falha ao baixar asset \"logo.png\" de https://cdn.exemplo.com/logo.png: HTTP 404" }
 ```
 
 ```json
@@ -228,7 +228,7 @@ Existe porque o `DELETE` exige o `preview_id` exato do preview ativo — sem est
   "active": {
     "preview_id": "550e8400-e29b-41d4-a716-446655440000",
     "port": 3031,
-    "preview_url": "http://meu-servidor.com:3030/"
+    "preview_url": "http://<seu-host>:3030/"
   },
   "retention_hours": 24,
   "stored": [
@@ -376,12 +376,12 @@ editar mais e POST /render { "preview_id": ... }
 | `STUDIO_PROXY` | `true` | `false` desliga o proxy da Studio nesta porta |
 | `PREVIEW_REOPEN` | `true` | `false` desliga a reabertura: `POST /preview` volta a aceitar só `html`, e `preview_id` passa a responder `400` |
 
-**Exemplo para produção no Coolify/VPS:**
+**Exemplo para produção:**
 
 ```
-PUBLIC_BASE_URL=http://meu-vps.com:3030
+PUBLIC_BASE_URL=http://<seu-host>:3030
 PREVIEW_PORT=3031
-PUBLIC_PREVIEW_URL=http://meu-vps.com:3031
+PUBLIC_PREVIEW_URL=http://<seu-host>:3031
 ```
 
 ---

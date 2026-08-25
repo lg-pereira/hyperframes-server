@@ -1,10 +1,9 @@
 // Plugin Fastify que expõe o MCP de autoria HyperFrames em /mcp.
 //
 // Transporte Streamable HTTP em modo STATELESS: uma instância de McpServer +
-// transport por requisição, descartada ao final. É o `httpStreamable`, default do
-// nó MCP Client Tool do n8n. Stateless porque o agente do n8n faz chamadas
-// independentes — não há nada que valha a pena manter entre elas, e sessões
-// exigiriam limpeza e expiração que só criariam bugs de estado.
+// transport por requisição, descartada ao final. Stateless porque o agente faz
+// chamadas independentes — não há nada que valha a pena manter entre elas, e
+// sessões exigiriam limpeza e expiração que só criariam bugs de estado.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";

@@ -3,3 +3,7 @@ node_modules/
 *.mp4
 *.log
 .DS_Store
+
+# Notas específicas do ambiente de cada um (não versionadas)
+NOTES.local.md
+*.local.md
