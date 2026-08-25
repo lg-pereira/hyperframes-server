@@ -68,6 +68,12 @@ services:
       - RENDER_TIMEOUT_MS=${RENDER_TIMEOUT_MS:-600000}
       # Timeout do POST /check, antes fixo em 60s.
       - CHECK_TIMEOUT_MS=${CHECK_TIMEOUT_MS:-60000}
+      # Janela para o log drenar depois que o CLI sai. O desfecho do job vem do
+      # `exit`; esperar o `close` prendia o job em "processing" até o
+      # RENDER_TIMEOUT_MS toda vez que o CLI deixava um Chromium segurando o
+      # stdout herdado — e, com MAX_CONCURRENT_RENDERS=1, isso é o endpoint
+      # inteiro em 429 nesse meio tempo. Subir só se ver render.log truncado.
+      - RENDER_DRAIN_MS=${RENDER_DRAIN_MS:-3000}
       # Mata o GRUPO de processos no timeout, não só o PID do CLI. Sem isso os
       # workers Chromium sobrevivem, viram órfãos de PID 1 e seguem consumindo
       # CPU e shm até o container reiniciar. false volta ao comportamento antigo.

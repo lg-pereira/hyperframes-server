@@ -311,7 +311,8 @@ O diretório de um job é removido quando:
 |----------|--------|-----------|
 | `RENDER_WORKERS` | `auto` | Nº de workers paralelos do render. Em ARM pode compensar fixar (ex: `4`) |
 | `MAX_CONCURRENT_RENDERS` | `1` | Teto de renders simultâneos. `0` desliga a guarda (todo POST spawna na hora) |
-| `RENDER_TIMEOUT_MS` | `600000` | Timeout do render (10 min) |
+| `RENDER_TIMEOUT_MS` | `600000` | Timeout do render (10 min). É o teto para um CLI **travado**, não o tempo de um render que falha |
+| `RENDER_DRAIN_MS` | `3000` | Janela para o log drenar depois que o CLI sai. Subir só se ver `render.log` truncado |
 | `KILL_PROCESS_GROUP` | `true` | Mata o grupo de processos no timeout, workers Chromium inclusive. `false` mata só o PID do CLI |
 | `JOB_SWEEP` | `true` | Varredura dos diretórios de job. `false` desliga |
 | `JOB_ERROR_RETENTION_MS` | `3600000` | Retenção de jobs com erro (1h) |
@@ -325,6 +326,11 @@ O diretório de um job é removido quando:
 - **Timeout:** o render é cancelado automaticamente após **10 minutos** (`RENDER_TIMEOUT_MS`). O
   cancelamento encerra o **grupo de processos inteiro**: sem isso os workers Chromium sobreviveriam
   ao CLI e seguiriam consumindo CPU e memória compartilhada até o container reiniciar
+- **Falha rápida chega rápido:** o desfecho do job sai do `exit` do CLI, não do `close`. O `close` só
+  dispara quando todos os pipes de stdio fecham, e o write-end deles é herdado por cada neto — um
+  Chromium que o CLI deixa para trás segura o `close` indefinidamente. Esperar por ele fazia um
+  render que falhou em 12s ficar em `processing` até o `RENDER_TIMEOUT_MS` e, com
+  `MAX_CONCURRENT_RENDERS=1`, todo `POST /render` nesse intervalo recebia `429`
 - **Logs:** o stdout/stderr do processo fica disponível em `GET /logs/:jobId` enquanto o job existir
 - Após enviar o render, use [GET /status/:jobId](./status.md) para acompanhar o progresso
 - Se o status for `error`, consulte [GET /logs/:jobId](./logs.md) para ver o output completo do render

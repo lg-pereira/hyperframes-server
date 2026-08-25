@@ -28,6 +28,7 @@ import {
   DEFAULT_DONE_RETENTION_MS,
 } from "./job-retention.mjs";
 import { createOrphanJanitor } from "./orphan-scan.mjs";
+import { settleOnExit, DEFAULT_DRAIN_MS } from "./child-outcome.mjs";
 
 // Binário local do hyperframes — evita que o npx baixe o pacote a cada chamada
 const HF_BIN = fileURLToPath(
@@ -102,6 +103,13 @@ const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS ?? "60000");
 
 // Graça entre o SIGTERM e o SIGKILL no grupo de processos.
 const RENDER_KILL_GRACE_MS = 5_000;
+
+// Janela para o stdout/stderr drenarem depois que o CLI sai. Ver child-outcome.mjs:
+// o desfecho vem do `exit`, e esperar o `close` é o que prendia o job quando o CLI
+// deixava um Chromium para trás segurando os pipes herdados.
+const RENDER_DRAIN_MS = parseInt(
+  process.env.RENDER_DRAIN_MS ?? String(DEFAULT_DRAIN_MS),
+);
 
 // Mata o GRUPO de processos em vez de só o PID do CLI. O `timeout` do execFile
 // sinaliza um PID; os workers Chromium, filhos dele, sobrevivem e são reparentados
@@ -1221,23 +1229,26 @@ app.post(
           stderr = appendCapped(stderr, c.toString());
         });
 
-        checkProc.on("error", (err) => {
-          clearTimeout(checkTimer);
-          resolve({ err, stdout, stderr });
-        });
-
-        checkProc.on("close", (code, signal) => {
-          clearTimeout(checkTimer);
-          const err =
-            code === 0
-              ? null
-              : {
-                  killed: signal != null,
-                  signal,
-                  code: signal != null ? null : code,
-                  message: `Command failed: ${cmd}\n${stderr}`,
-                };
-          resolve({ err, stdout, stderr });
+        // Mesmo desfecho-por-`exit` do /render: o check também abre browser, e um
+        // Chromium deixado para trás seguraria o `close` até o CHECK_TIMEOUT_MS —
+        // 60s de requisição HTTP pendurada por um resultado que já estava pronto.
+        settleOnExit(checkProc, {
+          drainMs: RENDER_DRAIN_MS,
+          killLeftovers: () => killTree(checkProc, "SIGKILL"),
+          onSettled: ({ code, signal, error }) => {
+            clearTimeout(checkTimer);
+            const err =
+              error ??
+              (code === 0
+                ? null
+                : {
+                    killed: signal != null,
+                    signal,
+                    code: signal != null ? null : code,
+                    message: `Command failed: ${cmd}\n${stderr}`,
+                  });
+            resolve({ err, stdout, stderr });
+          },
         });
       });
 
@@ -1614,19 +1625,35 @@ app.post(
     proc.stdout?.on("data", onRenderChunk);
     proc.stderr?.on("data", onRenderChunk);
 
-    // ENOENT no binário e afins: o processo nunca chega a rodar.
-    proc.on("error", (err) => onRenderDone(err));
-
-    // "close" (e não "exit") para garantir que stdout/stderr já foram drenados —
-    // senão o render.log pode sair truncado justamente na falha que interessa.
-    proc.on("close", (code, signal) => {
-      if (code === 0) return onRenderDone(null);
-      onRenderDone({
-        killed: signal != null,
-        signal,
-        code: signal != null ? null : code,
-        message: `Command failed: ${renderCmd}\n${renderLog.slice(-4000)}`,
-      });
+    // Desfecho pelo `exit`, com uma janela curta para o log drenar — nunca pelo
+    // `close` (ver child-outcome.mjs). O `close` espera TODOS os pipes fecharem, e
+    // o write-end deles é herdado por cada neto: quando o render falha, o CLI sai
+    // deixando um Chromium vivo que segura o stdout, e o `close` não chega nunca.
+    // Foi o que prendeu um render real em "processing" por 1800s enquanto o mutex
+    // de concorrência devolvia 429 para todo o resto.
+    settleOnExit(proc, {
+      drainMs: RENDER_DRAIN_MS,
+      // A janela venceu: sobrou processo do render segurando os pipes. Reapa aqui,
+      // que é o único ponto que ainda sabe qual grupo é. Sai como warn porque o
+      // esperado é o CLI fechar os próprios browsers.
+      killLeftovers: () => {
+        app.log.warn(
+          { jobId },
+          "CLI saiu mas os pipes ficaram abertos — matando o que sobrou do grupo",
+        );
+        killTree(proc, "SIGKILL");
+      },
+      onSettled: ({ code, signal, error }) => {
+        // ENOENT no binário e afins: o processo nunca chegou a rodar.
+        if (error) return onRenderDone(error);
+        if (code === 0) return onRenderDone(null);
+        onRenderDone({
+          killed: signal != null,
+          signal,
+          code: signal != null ? null : code,
+          message: `Command failed: ${renderCmd}\n${renderLog.slice(-4000)}`,
+        });
+      },
     });
 
     reply.code(202).send({
