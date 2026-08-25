@@ -2,10 +2,13 @@
 FROM node:22-slim
 
 # ── Dependências de sistema para Chromium + FFmpeg ───────────────────────────
+# procps traz `ps`/`pkill`: sem ele a imagem não tem como inspecionar processos,
+# e diagnosticar Chromium órfão exige ler /proc na mão com node.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     chromium \
     ca-certificates \
+    procps \
     fonts-liberation \
     fonts-noto \
     fonts-noto-color-emoji \
