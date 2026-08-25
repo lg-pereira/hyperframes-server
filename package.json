@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
-    "test": "node test/polyfill.test.mjs && node test/preview-source.test.mjs && node test/mcp-cache.test.mjs && node test/mcp-search.test.mjs && node test/render-slots.test.mjs && node test/job-retention.test.mjs && node test/orphan-scan.test.mjs"
+    "test": "node test/polyfill.test.mjs && node test/preview-source.test.mjs && node test/mcp-cache.test.mjs && node test/mcp-search.test.mjs && node test/render-slots.test.mjs && node test/job-retention.test.mjs && node test/orphan-scan.test.mjs && node test/dockerfile-copy.test.mjs"
   },
   "dependencies": {
     "@fastify/reply-from": "^9.8.0",
