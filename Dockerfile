@@ -61,9 +61,18 @@ RUN npm ci --omit=dev
 # ── Copia o servidor ──────────────────────────────────────────────────────────
 # studio-polyfill.js é lido no boot e injetado no HTML da Studio servida pelo
 # proxy — sem ele, salvar edições quebra fora de HTTPS/localhost.
-# preview-source.mjs é importado por server.mjs no topo: sem ele o processo nem
-# inicia (ERR_MODULE_NOT_FOUND) e o container fica em restart loop.
+#
+# ATENÇÃO: todo módulo importado por server.mjs precisa estar nesta lista. São
+# imports estáticos de topo, então um arquivo esquecido não degrada nada — o
+# processo nem inicia (ERR_MODULE_NOT_FOUND) e o container entra em restart loop,
+# com a imagem tendo buildado sem um único aviso. Ao adicionar um .mjs na raiz,
+# adicione aqui junto:
+#   preview-source.mjs  decisão de fonte do POST /preview
+#   render-slots.mjs    guarda de concorrência do POST /render
+#   job-retention.mjs   política de retenção dos diretórios de job
+#   orphan-scan.mjs     detecção de Chromium órfão
 COPY server.mjs preview-source.mjs studio-polyfill.js ./
+COPY render-slots.mjs job-retention.mjs orphan-scan.mjs ./
 COPY mcp ./mcp
 COPY scripts ./scripts
 
