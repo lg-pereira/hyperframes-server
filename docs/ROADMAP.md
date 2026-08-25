@@ -34,6 +34,26 @@ Um servidor em produção ficou com `activePreview` apontando para uma Studio qu
 
 Os arquivos de um preview sobreviviam 24h ao processo da Studio, mas só podiam ser **renderizados**: não havia rota para voltar a vê-los ou editá-los. `POST /preview` passou a aceitar `preview_id` além de `html` e reabre a Studio sobre o diretório existente — no lugar, mesmo id, edições preservadas. Kill-switch: `PREVIEW_REOPEN=false`.
 
+### 2026-08-25 — Estabilidade do render: fila, retenção e órfãos
+
+Um render de 733 frames ficou preso no frame 21 e morreu no timeout de 10 min. A causa imediata era a
+composição (blur em vídeo de fundo, rasterizado em CPU por causa do `--no-browser-gpu`), mas a
+investigação expôs quatro fragilidades independentes dela, todas em [server.mjs](../server.mjs):
+
+- **Sem fila.** Todo `POST /render` spawnava na hora. Dois renders concorrentes com `RENDER_WORKERS=4`
+  são 8 Chromiums disputando os mesmos cores e o mesmo `shm` — não dão dois renders lentos, dão dois
+  timeouts. Agora o excedente recebe `429` com `Retry-After` e nenhum job é criado.
+- **`hf_jobs` nunca varrido.** O único caminho de limpeza era o timer de 1 min disparado pelo
+  *download*. Job que falhou, ou que ninguém baixou, ficava para sempre com os frames PNG
+  intermediários. Retenção nova: 1h para erro, 24h para concluído, nunca para render em andamento.
+- **SIGTERM não alcançava os filhos** (ver o aprendizado abaixo).
+- **Sem rede de segurança.** Um varredor mata Chromium com `ppid=1` que sobreviva a duas passadas.
+
+Tudo ligado por padrão, cada peça com kill-switch por env var. O teste de controle rodou os dois modos:
+com `KILL_PROCESS_GROUP=false` os órfãos reaparecem, o que prova que foi a correção que os eliminou.
+
+Tradeoff assumido: o `GET /logs` de um render que falhou expira em 1h junto com o job.
+
 ---
 
 ## Aprendizados
@@ -128,3 +148,32 @@ Na implementação, dois detalhes fizeram diferença: o caminho de reabertura **
 Cache fresco → rede → **cache velho com aviso**. O último degrau é o que impede uma indisponibilidade do GitHub de travar a geração de uma cena. Falhar de verdade só quando não há cache nem rede.
 
 E quando o upstream publica uma revisão, use-a como chave do cache agregado em vez de adivinhar um TTL.
+
+### SIGTERM não atravessa a árvore de processos — e `execFile` não deixa consertar
+
+O timeout do render usava a opção `timeout` do `execFile`. Ela sinaliza **um PID**: o do CLI. Os
+workers Chromium, filhos dele, não recebem nada — são reparentados para o PID 1 e seguem vivos,
+consumindo CPU e `shm` até o container reiniciar. Num container com `init: true` isso é pior do que
+parece: o tini *reapa zumbi*, mas não mata órfão vivo, então o vazamento é invisível em `ps` para quem
+procura processo defunct.
+
+A correção é `kill(-pid)`, que sinaliza o grupo inteiro, e ela exige que o filho seja líder de um grupo
+novo — `detached: true`. O detalhe que custou uma sessão de depuração:
+
+> **`execFile` descarta `detached` em silêncio.** Ele repassa ao `spawn` apenas uma whitelist de opções
+> (`cwd`, `env`, `uid`, `gid`, `shell`, `signal`, `windowsHide`, `windowsVerbatimArguments`). Passar
+> `detached: true` para `execFile` não gera erro nem aviso: o filho herda o grupo do servidor, e o
+> `kill(-pid)` falha com `ESRCH` — ou, num azar de pid, acertaria o próprio servidor.
+
+Só o `spawn` aceita. Por isso os três pontos que abrem browser (render, check, preview) usam `spawn`, e
+o que se perde na troca (`maxBuffer`) foi reimplementado como teto explícito de log.
+
+Verificar valeu mais que ler a documentação: `ps -o pgid=` no filho mostrou o grupo herdado em um
+segundo, enquanto a doc do `detached` descreve o comportamento pretendido sem mencionar a whitelist.
+
+### `detached: true` obriga a ter handler de saída
+
+Um filho em grupo/sessão própria **não** morre junto com o pai, e não recebe o Ctrl+C do terminal. Sem
+`process.on("SIGTERM"/"SIGINT")` matando os grupos registrados, a correção do vazamento no timeout
+criaria um vazamento no restart. É a mesma lição do registro de processo em memória, um degrau acima:
+não basta saber quem está vivo, é preciso um caminho que os encerre quando o servidor sai.

@@ -130,5 +130,10 @@ done
 ## Notas
 
 - Recomenda-se um intervalo de **3 a 10 segundos** entre cada poll para não sobrecarregar o servidor
-- Jobs são automaticamente removidos **60 segundos após o download** — após esse tempo, o status retorna 404
-- O tempo médio de renderização varia com a duração e complexidade da composição; o timeout máximo é de **10 minutos**
+- Jobs são removidos **60 segundos após o download** — após esse tempo, o status retorna 404
+- Jobs também expiram por idade, mesmo sem download: **1 hora** para os que terminaram em `error`,
+  **24 horas** para os `done` que ninguém baixou. Depois disso o status também é 404 — ver
+  [render.md](./render.md#retenção-dos-diretórios-de-job)
+- O tempo médio de renderização varia com a duração e complexidade da composição; o timeout máximo é
+  de **10 minutos** (`RENDER_TIMEOUT_MS`). Um job cancelado por timeout aparece aqui como `error`, com
+  a mensagem dizendo explicitamente que foi timeout

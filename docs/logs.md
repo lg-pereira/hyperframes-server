@@ -80,3 +80,8 @@ fi
 - O arquivo `render.log` contém todo o stdout/stderr do processo `hyperframes render`, incluindo progresso de frames e mensagens do FFmpeg
 - Em caso de erro, o `render.log` também está embutido no campo `error` retornado por `GET /status/:jobId` (após `--- log ---`)
 - O log é removido junto com o job: **60 segundos após o download** do vídeo
+
+> **Atenção — o log de um render que falhou expira em 1 hora.** Jobs com erro usam retenção curta
+> (`JOB_ERROR_RETENTION_MS`, padrão 1h) porque são o que mais ocupa disco: ficam com todos os frames
+> PNG intermediários. Para investigar uma falha depois desse prazo, salve o log assim que o status
+> virar `error`, ou suba `JOB_ERROR_RETENTION_MS` no ambiente.

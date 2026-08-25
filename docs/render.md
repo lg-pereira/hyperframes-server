@@ -271,16 +271,60 @@ hyperframes render <jobDir> -o <output.mp4> -f <fps> -w <workers> --no-browser-g
 - Se o arquivo estiver vazio ou ausente mesmo com exit 0, o job é marcado como `error`
 - Em caso de erro, o `error.txt` inclui a mensagem e o conteúdo do `render.log`
 
-## Variável de ambiente
+## Um render por vez
+
+O servidor executa **um render de cada vez** (`MAX_CONCURRENT_RENDERS`, padrão `1`). Um `POST /render`
+que chegue com outro em andamento recebe **`429`** com o header `Retry-After`, e **nenhum job é criado**:
+
+```json
+{
+  "error": "Já há 1 render em andamento (limite: 1). Cada render sobe vários Chromiums — rodar em paralelo faz os dois estourarem o timeout. Tente de novo em ~30s.",
+  "renders_in_flight": 1,
+  "retry_after_s": 30
+}
+```
+
+Não é uma fila: nada fica pendurado esperando vez. Quem chama controla o ritmo — no n8n, um nó *Wait*
+mais retry no 429 resolve. O estado atual aparece em [GET /health](./health.md) (`renders_in_flight`).
+
+A razão é física: cada render sobe `RENDER_WORKERS` Chromiums. Dois renders em paralelo numa VPS
+pequena não produzem dois renders lentos, produzem dois timeouts.
+
+## Retenção dos diretórios de job
+
+O diretório de um job é removido quando:
+
+| Situação | Prazo | Variável |
+|----------|-------|----------|
+| Download iniciado | 1 min depois | — |
+| Job com `error` | 1 hora | `JOB_ERROR_RETENTION_MS` |
+| Job em `processing` sem processo vivo (container reiniciado no meio) | 1 hora | `JOB_ERROR_RETENTION_MS` |
+| Job `done` nunca baixado | 24 horas | `JOB_DONE_RETENTION_MS` |
+| Render em andamento | nunca | — |
+
+> **Atenção:** o `GET /logs/:jobId` de um render que falhou some junto, em 1 hora. Para investigar um
+> erro no dia seguinte, salve o log antes ou suba `JOB_ERROR_RETENTION_MS`.
+
+## Variáveis de ambiente
 
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
 | `RENDER_WORKERS` | `auto` | Nº de workers paralelos do render. Em ARM pode compensar fixar (ex: `4`) |
+| `MAX_CONCURRENT_RENDERS` | `1` | Teto de renders simultâneos. `0` desliga a guarda (todo POST spawna na hora) |
+| `RENDER_TIMEOUT_MS` | `600000` | Timeout do render (10 min) |
+| `KILL_PROCESS_GROUP` | `true` | Mata o grupo de processos no timeout, workers Chromium inclusive. `false` mata só o PID do CLI |
+| `JOB_SWEEP` | `true` | Varredura dos diretórios de job. `false` desliga |
+| `JOB_ERROR_RETENTION_MS` | `3600000` | Retenção de jobs com erro (1h) |
+| `JOB_DONE_RETENTION_MS` | `86400000` | Retenção de jobs concluídos (24h) |
+| `CHROMIUM_JANITOR` | `true` | Varredura periódica de Chromium órfão (ppid=1) |
+| `CHROMIUM_JANITOR_INTERVAL_MS` | `600000` | Intervalo dessa varredura (10 min) |
 
 ## Notas
 
 - **Assíncrono:** a resposta `202` é imediata — o vídeo ainda não está pronto
-- **Timeout:** o render é cancelado automaticamente após **10 minutos**
+- **Timeout:** o render é cancelado automaticamente após **10 minutos** (`RENDER_TIMEOUT_MS`). O
+  cancelamento encerra o **grupo de processos inteiro**: sem isso os workers Chromium sobreviveriam
+  ao CLI e seguiriam consumindo CPU e memória compartilhada até o container reiniciar
 - **Logs:** o stdout/stderr do processo fica disponível em `GET /logs/:jobId` enquanto o job existir
 - Após enviar o render, use [GET /status/:jobId](./status.md) para acompanhar o progresso
 - Se o status for `error`, consulte [GET /logs/:jobId](./logs.md) para ver o output completo do render

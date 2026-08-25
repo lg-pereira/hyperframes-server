@@ -178,7 +178,9 @@ echo "Render iniciado: $JOB_ID"
 
 ## Notas
 
-- Timeout interno de **60 segundos** (contra 15s do `/lint`, já que o `check` abre um browser real)
+- Timeout interno de **60 segundos** (contra 15s do `/lint`, já que o `check` abre um browser real),
+  ajustável por `CHECK_TIMEOUT_MS`. Ao estourar, o **grupo de processos inteiro** é encerrado — sem
+  isso o Chromium aberto pelo check sobreviveria ao CLI e ficaria consumindo recursos
 - Os arquivos temporários criados durante o check são **sempre removidos** ao final, mesmo em caso de erro
 - Aceita `compositions` (padrão modular via `data-composition-src`), igual a `/preview` e `/render`
 - Diferente do `/lint`, o `/check` aceita `assets` — necessários para avaliar layout e contraste com mídia real presente
