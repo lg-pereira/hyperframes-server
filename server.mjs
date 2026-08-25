@@ -29,6 +29,7 @@ import {
 } from "./job-retention.mjs";
 import { createOrphanJanitor } from "./orphan-scan.mjs";
 import { settleOnExit, DEFAULT_DRAIN_MS } from "./child-outcome.mjs";
+import { createIdleWatchdog, DEFAULT_IDLE_MS } from "./idle-watchdog.mjs";
 
 // Binário local do hyperframes — evita que o npx baixe o pacote a cada chamada
 const HF_BIN = fileURLToPath(
@@ -109,6 +110,15 @@ const RENDER_KILL_GRACE_MS = 5_000;
 // deixava um Chromium para trás segurando os pipes herdados.
 const RENDER_DRAIN_MS = parseInt(
   process.env.RENDER_DRAIN_MS ?? String(DEFAULT_DRAIN_MS),
+);
+
+// Silêncio máximo de um render vivo. Ver idle-watchdog.mjs: o CLI do hyperframes
+// imprime "Render failed" e NÃO sai — sem `exit`, o desfecho pelo exit não chega,
+// e o job ficava preso até o RENDER_TIMEOUT_MS (1800s na VPS) segurando a vaga
+// única. Um render que trabalha fala; um que desistiu fica calado para sempre.
+// RENDER_IDLE_MS=0 desliga o freio e volta ao comportamento anterior.
+const RENDER_IDLE_MS = parseInt(
+  process.env.RENDER_IDLE_MS ?? String(DEFAULT_IDLE_MS),
 );
 
 // Mata o GRUPO de processos em vez de só o PID do CLI. O `timeout` do execFile
@@ -1520,6 +1530,7 @@ app.post(
     // e seguem consumindo CPU e shm até o container reiniciar. Aqui o sinal vai
     // para o grupo inteiro (ver killTree).
     let timedOut = false;
+    let idleKilled = false;
 
     // Render em background — não bloqueia a resposta
     // CLI: hyperframes render [DIR] -o <output> -f <fps> -w <workers>
@@ -1553,6 +1564,7 @@ app.post(
       if (settled) return;
       settled = true;
       clearTimeout(killTimer);
+      idleWatchdog.stop();
       activeRenders.delete(jobId);
       releaseSlot();
 
@@ -1566,10 +1578,17 @@ app.post(
         // Quem mata é o nosso timer, então o desfecho do processo não sabe dizer
         // que foi timeout — a mensagem é sintetizada aqui. Sem isso o GET /status
         // devolveria só "Command failed" e o diagnóstico regrediria.
-        const message = timedOut
-          ? `Render cancelado por timeout após ${Math.round(RENDER_TIMEOUT_MS / 1000)}s ` +
-            `(RENDER_TIMEOUT_MS). O grupo de processos, workers Chromium inclusive, foi encerrado.`
-          : err.message;
+        // A ordem importa: quem morreu por ociosidade JÁ falhou antes, e o erro
+        // real está no log logo abaixo. Chamar isso de "timeout" mandaria o
+        // diagnóstico para o lugar errado — foi o que essa mensagem fez uma vez.
+        const message = idleKilled
+          ? `O CLI parou de produzir saída por ${Math.round(RENDER_IDLE_MS / 1000)}s ` +
+            `e não saiu sozinho (RENDER_IDLE_MS). O motivo real da falha está no log abaixo — ` +
+            `esta linha é só o servidor encerrando um processo que já tinha desistido.`
+          : timedOut
+            ? `Render cancelado por timeout após ${Math.round(RENDER_TIMEOUT_MS / 1000)}s ` +
+              `(RENDER_TIMEOUT_MS). O grupo de processos, workers Chromium inclusive, foi encerrado.`
+            : err.message;
         app.log.error({ jobId, err: message, timedOut }, "Render failed");
         await writeFile(
           join(jobDir, "error.txt"),
@@ -1616,10 +1635,32 @@ app.post(
       setTimeout(() => killTree(proc, "SIGKILL"), RENDER_KILL_GRACE_MS).unref();
     }, RENDER_TIMEOUT_MS);
 
+    // Freio para o CLI que falha e não sai (ver idle-watchdog.mjs). Diferente do
+    // killTimer acima: aquele é o teto absoluto de um render que ainda pode estar
+    // trabalhando; este dispara no silêncio, que é o que um CLI desistente produz.
+    const idleWatchdog = createIdleWatchdog({
+      idleMs: RENDER_IDLE_MS,
+      onIdle: () => {
+        idleKilled = true;
+        app.log.warn(
+          { jobId, idleMs: RENDER_IDLE_MS },
+          "Render sem saída há tempo demais e sem sair — encerrando o grupo",
+        );
+        killTree(proc, "SIGTERM");
+        setTimeout(
+          () => killTree(proc, "SIGKILL"),
+          RENDER_KILL_GRACE_MS,
+        ).unref();
+      },
+    });
+    idleWatchdog.touch();
+
     // Captura stdout/stderr do render para o log do job e para o console do container
     const onRenderChunk = (chunk) => {
       const text = chunk.toString();
       renderLog = appendCapped(renderLog, text);
+      // Qualquer saída é prova de vida: rearma o watchdog.
+      idleWatchdog.touch();
       process.stdout.write(`[render ${jobId.slice(0, 8)}] ${text}`);
     };
     proc.stdout?.on("data", onRenderChunk);

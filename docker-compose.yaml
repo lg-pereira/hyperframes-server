@@ -74,6 +74,13 @@ services:
       # stdout herdado — e, com MAX_CONCURRENT_RENDERS=1, isso é o endpoint
       # inteiro em 429 nesse meio tempo. Subir só se ver render.log truncado.
       - RENDER_DRAIN_MS=${RENDER_DRAIN_MS:-3000}
+      # Silêncio máximo de um render vivo. O CLI do hyperframes imprime
+      # "Render failed" e NÃO sai — sem `exit`, nada conclui o job, e ele ficava
+      # preso até o RENDER_TIMEOUT_MS segurando a vaga única. Um render que
+      # trabalha fala; um que desistiu fica calado. CUIDADO ao apertar: matar um
+      # render que ainda está trabalhando é pior que o bug. Aperte só depois de
+      # observar quanto tempo os seus renders reais passam calados. 0 desliga.
+      - RENDER_IDLE_MS=${RENDER_IDLE_MS:-300000}
       # Mata o GRUPO de processos no timeout, não só o PID do CLI. Sem isso os
       # workers Chromium sobrevivem, viram órfãos de PID 1 e seguem consumindo
       # CPU e shm até o container reiniciar. false volta ao comportamento antigo.
