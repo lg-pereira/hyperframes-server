@@ -71,8 +71,9 @@ RUN npm ci --omit=dev
 #   render-slots.mjs    guarda de concorrência do POST /render
 #   job-retention.mjs   política de retenção dos diretórios de job
 #   orphan-scan.mjs     detecção de Chromium órfão
+#   child-outcome.mjs   desfecho do processo filho (exit, não close)
 COPY server.mjs preview-source.mjs studio-polyfill.js ./
-COPY render-slots.mjs job-retention.mjs orphan-scan.mjs ./
+COPY render-slots.mjs job-retention.mjs orphan-scan.mjs child-outcome.mjs ./
 COPY mcp ./mcp
 COPY scripts ./scripts
 

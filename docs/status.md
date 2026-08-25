@@ -135,5 +135,6 @@ done
   **24 horas** para os `done` que ninguém baixou. Depois disso o status também é 404 — ver
   [render.md](./render.md#retenção-dos-diretórios-de-job)
 - O tempo médio de renderização varia com a duração e complexidade da composição; o timeout máximo é
-  de **10 minutos** (`RENDER_TIMEOUT_MS`). Um job cancelado por timeout aparece aqui como `error`, com
+  de **10 minutos** (`RENDER_TIMEOUT_MS`) — que é o teto para um CLI travado, não o tempo de um render
+  que falha: uma falha do CLI vira `error` assim que ele sai. Um job cancelado por timeout aparece aqui como `error`, com
   a mensagem dizendo explicitamente que foi timeout
