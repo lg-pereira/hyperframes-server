@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   writeFile,
   mkdir,
@@ -12,9 +12,22 @@ import {
 } from "node:fs/promises";
 import { join, dirname, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
+import {
+  createReadStream,
+  existsSync,
+  readdirSync,
+  readFileSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import { UUID_RE, resolvePreviewSource } from "./preview-source.mjs";
+import { createRenderSlots } from "./render-slots.mjs";
+import {
+  shouldSweepJob,
+  isJobDir,
+  DEFAULT_ERROR_RETENTION_MS,
+  DEFAULT_DONE_RETENTION_MS,
+} from "./job-retention.mjs";
+import { createOrphanJanitor } from "./orphan-scan.mjs";
 
 // Binário local do hyperframes — evita que o npx baixe o pacote a cada chamada
 const HF_BIN = fileURLToPath(
@@ -68,6 +81,54 @@ const PREVIEW_RETENTION_MS = parseInt(
 // contrato antigo (só `html`) sem deploy de código.
 const PREVIEW_REOPEN_ENABLED = process.env.PREVIEW_REOPEN !== "false";
 
+// ─── Guardas de estabilidade do render ───────────────────────────────────────
+// Todas ligadas por padrão, cada uma com kill-switch por env var: o rollback é
+// mudar a variável e reiniciar, sem deploy de código.
+
+// Teto de renders simultâneos. Cada render sobe RENDER_WORKERS Chromiums; dois em
+// paralelo numa VPS pequena não dão dois renders lentos, dão dois timeouts.
+// MAX_CONCURRENT_RENDERS=0 desliga a guarda (comportamento anterior).
+const MAX_CONCURRENT_RENDERS = parseInt(
+  process.env.MAX_CONCURRENT_RENDERS ?? "1",
+);
+
+// Timeout do render. Era fixo em 10 min dentro das opções do execFile.
+const RENDER_TIMEOUT_MS = parseInt(
+  process.env.RENDER_TIMEOUT_MS ?? String(10 * 60 * 1000),
+);
+
+// Timeout do POST /check, que também abre browser real. Era fixo em 60s.
+const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS ?? "60000");
+
+// Graça entre o SIGTERM e o SIGKILL no grupo de processos.
+const RENDER_KILL_GRACE_MS = 5_000;
+
+// Mata o GRUPO de processos em vez de só o PID do CLI. O `timeout` do execFile
+// sinaliza um PID; os workers Chromium, filhos dele, sobrevivem e são reparentados
+// para o PID 1. KILL_PROCESS_GROUP=false volta ao comportamento antigo.
+const KILL_PROCESS_GROUP = process.env.KILL_PROCESS_GROUP !== "false";
+
+// Varredura dos diretórios de job. JOB_SWEEP=false desliga.
+const JOB_SWEEP_ENABLED = process.env.JOB_SWEEP !== "false";
+const JOB_ERROR_RETENTION_MS = parseInt(
+  process.env.JOB_ERROR_RETENTION_MS ?? String(DEFAULT_ERROR_RETENTION_MS),
+);
+const JOB_DONE_RETENTION_MS = parseInt(
+  process.env.JOB_DONE_RETENTION_MS ?? String(DEFAULT_DONE_RETENTION_MS),
+);
+
+// Varredura de Chromium órfão (ppid=1). CHROMIUM_JANITOR=false desliga.
+const CHROMIUM_JANITOR_ENABLED = process.env.CHROMIUM_JANITOR !== "false";
+const CHROMIUM_JANITOR_INTERVAL_MS = parseInt(
+  process.env.CHROMIUM_JANITOR_INTERVAL_MS ?? String(10 * 60 * 1000),
+);
+
+const renderSlots = createRenderSlots({ max: MAX_CONCURRENT_RENDERS });
+
+// Renders em andamento: jobId → processo. Alimenta três coisas — o `isActive` da
+// varredura de jobs, o kill de grupo no shutdown, e o GET /health.
+const activeRenders = new Map();
+
 // Apenas um preview ativo por vez
 let activePreview = null; // { proc, previewId, port, timer }
 
@@ -92,6 +153,51 @@ function publicPreviewUrls(port) {
   return { direct, preview: studioProxyUrl() ?? direct };
 }
 
+// Sinaliza o GRUPO de processos do filho, não só o PID dele.
+//
+// `proc.kill()` e o `timeout` do execFile mandam o sinal para um PID. O CLI do
+// hyperframes spawna Chromiums como filhos: eles não recebem nada, ficam órfãos e
+// são reparentados para o PID 1, onde seguem vivos consumindo CPU e shm até o
+// container reiniciar. `kill(-pid)` alcança a árvore inteira.
+//
+// PRÉ-REQUISITO: o filho precisa ter sido criado com `spawn(..., { detached: true })`,
+// que o torna líder de um grupo novo. **`execFile` NÃO serve** — ele repassa ao
+// spawn apenas uma whitelist de opções (cwd, env, uid, gid, shell, signal,
+// windowsHide, windowsVerbatimArguments) e descarta `detached` em silêncio. Sem
+// grupo próprio, o filho herda o grupo do servidor e `kill(-pid)` falha com ESRCH
+// — ou, pior, acertaria o próprio servidor se o pid coincidisse com o pgid dele.
+// Por isso os três pontos que abrem browser (render, check, preview) usam spawn.
+//
+// Com KILL_PROCESS_GROUP=false, cai no kill de PID único de sempre.
+function killTree(proc, signal = "SIGTERM") {
+  if (!proc?.pid) return false;
+  try {
+    if (KILL_PROCESS_GROUP) process.kill(-proc.pid, signal);
+    else proc.kill(signal);
+    return true;
+  } catch {
+    // ESRCH: já morreu. Qualquer outro erro aqui não tem ação de recuperação.
+    return false;
+  }
+}
+
+// Opções de spawn que tornam o filho líder do próprio grupo de processos.
+// Sem isso o `kill(-pid)` do killTree() falha com ESRCH.
+const detachedOpts = () => (KILL_PROCESS_GROUP ? { detached: true } : {});
+
+// Teto do log acumulado em memória por processo. Substitui o `maxBuffer` do
+// execFile, que o spawn não tem: sem isso, um CLI verborrágico num render longo
+// faz o log crescer sem limite. Corta o começo e mantém o fim, que é onde está o
+// erro. 32MB é o mesmo valor que o maxBuffer usava.
+const MAX_LOG_BYTES = 32 * 1024 * 1024;
+function appendCapped(buffer, text) {
+  const next = buffer + text;
+  if (next.length <= MAX_LOG_BYTES) return next;
+  return (
+    "[... início do log truncado ...]\n" + next.slice(-(MAX_LOG_BYTES - 40))
+  );
+}
+
 // Mata o processo ativo e limpa todos os studios registrados pelo hyperframes.
 // NÃO apaga os arquivos: o que a Studio salvou em disco precisa sobreviver para
 // que `POST /render {preview_id}` consiga renderizar as edições. A limpeza fica
@@ -100,9 +206,8 @@ function publicPreviewUrls(port) {
 async function killActivePreview({ purge = false } = {}) {
   if (activePreview) {
     clearTimeout(activePreview.timer);
-    try {
-      activePreview.proc.kill("SIGTERM");
-    } catch {}
+    // Grupo inteiro: a Studio também abre Chromium (thumbnails, captura de frame).
+    killTree(activePreview.proc, "SIGTERM");
     if (purge) {
       rm(join(PREVIEW_DIR, activePreview.previewId), {
         recursive: true,
@@ -123,14 +228,17 @@ async function killActivePreview({ purge = false } = {}) {
 // Parseia a porta real do stdout (pode diferir da solicitada se houver conflito).
 function spawnPreview(dir, port) {
   return new Promise((resolve, reject) => {
-    const proc = execFile(
+    // spawn, não execFile: só ele aceita `detached`, e é isso que dá ao preview um
+    // grupo próprio para o killTree() alcançar (a Studio também abre Chromium).
+    // O stdout já era consumido à mão aqui, então nada se perde na troca.
+    const proc = spawn(
       HF_BIN,
       ["preview", "--port", String(port), "--no-open", "--force-new"],
-      { cwd: dir, timeout: 0 },
+      { cwd: dir, ...detachedOpts() },
     );
 
     const readyTimeout = setTimeout(() => {
-      proc.kill();
+      killTree(proc);
       reject(new Error("hyperframes preview não iniciou em 30s"));
     }, 30_000);
 
@@ -199,6 +307,86 @@ async function sweepOldPreviews() {
         app.log.info({ previewId: entry }, "Preview expirado removido");
       }
     } catch {}
+  }
+}
+
+// Remove diretórios de job segundo a política de job-retention.mjs.
+//
+// Antes disso o único caminho de limpeza era o timer disparado quando o download
+// COMEÇA: job que falhou, ou que ninguém baixou, ficava para sempre — com os
+// frames PNG intermediários, vários GB por render longo. /tmp cheio faz o Chromium
+// crashar com erros que não parecem falta de disco.
+async function sweepOldJobs() {
+  let entries;
+  try {
+    entries = await readdir(WORK_DIR);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    // lint-*/check-* já se limpam no finally dos handlers, e varrê-los durante uma
+    // requisição síncrona apagaria o diretório debaixo do CLI em execução.
+    if (!isJobDir(entry)) continue;
+
+    const dir = join(WORK_DIR, entry);
+    try {
+      const info = await stat(dir);
+      const { sweep, reason } = shouldSweepJob(
+        {
+          hasDone: existsSync(join(dir, "done.txt")),
+          hasError: existsSync(join(dir, "error.txt")),
+          ageMs: now - info.mtimeMs,
+          isActive: activeRenders.has(entry),
+        },
+        {
+          errorRetentionMs: JOB_ERROR_RETENTION_MS,
+          doneRetentionMs: JOB_DONE_RETENTION_MS,
+        },
+      );
+      if (sweep) {
+        await rm(dir, { recursive: true, force: true });
+        app.log.info({ jobId: entry, reason }, "Job expirado removido");
+      }
+    } catch {}
+  }
+}
+
+// Varredura de Chromium órfão. Lê /proc de forma síncrona: são dezenas de arquivos
+// minúsculos, o custo é irrelevante a cada 10 min, e a versão async complicaria o
+// contrato do reader sem ganho.
+const orphanJanitor = createOrphanJanitor({
+  reader: {
+    listPids: () => readdirSync("/proc").filter((p) => /^\d+$/.test(p)),
+    readStat: (pid) => readFileSync(`/proc/${pid}/stat`, "utf8"),
+    readCmdline: (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8"),
+  },
+  kill: (pid) => {
+    try {
+      process.kill(Number(pid), "SIGKILL");
+      return true;
+    } catch {
+      return false;
+    }
+  },
+});
+
+// Com o kill de grupo funcionando, este log deveria ficar VAZIO para sempre.
+// Um warn aqui significa que algum caminho ainda solta filho — é sinal, não rotina.
+function sweepOrphanChromiums() {
+  let result;
+  try {
+    result = orphanJanitor.sweep();
+  } catch (err) {
+    // /proc não existe (macOS em dev, por exemplo) — o janitor simplesmente não faz nada.
+    app.log.debug({ err: err.message }, "Varredura de órfãos indisponível");
+    return;
+  }
+  for (const { pid, cmdline } of result.killed) {
+    app.log.warn(
+      { pid, cmdline: cmdline.slice(0, 120) },
+      "Chromium órfão (ppid=1) morto pelo janitor — algum caminho não matou o grupo",
+    );
   }
 }
 
@@ -301,12 +489,21 @@ app.get(
           properties: {
             status: { type: "string" },
             uptime: { type: "number" },
+            renders_in_flight: { type: "integer" },
+            max_concurrent_renders: { type: "integer" },
           },
         },
       },
     },
   },
-  async () => ({ status: "ok", uptime: process.uptime() }),
+  // renders_in_flight expõe o estado do mutex: sem ele, um 429 do POST /render não
+  // teria como ser distinguido de um bug pelo lado de fora.
+  async () => ({
+    status: "ok",
+    uptime: process.uptime(),
+    renders_in_flight: renderSlots.inFlight(),
+    max_concurrent_renders: renderSlots.max(),
+  }),
 );
 
 // ─── POST /preview ────────────────────────────────────────────────────────────
@@ -592,7 +789,8 @@ app.get(
         const info = await stat(join(PREVIEW_DIR, entry));
         stored.push({
           preview_id: entry,
-          age_hours: Math.round(((Date.now() - info.mtimeMs) / 3_600_000) * 10) / 10,
+          age_hours:
+            Math.round(((Date.now() - info.mtimeMs) / 3_600_000) * 10) / 10,
           size_bytes: await dirSize(join(PREVIEW_DIR, entry)),
           renderable: true,
         });
@@ -990,24 +1188,71 @@ app.post(
       if (tolerance != null) args.push("--tolerance", String(tolerance));
       if (contrast === false) args.push("--no-contrast");
 
+      // Mesmo tratamento de timeout do /render: o check abre browser real, e matar
+      // só o PID do CLI deixaria o Chromium vivo como órfão de PID 1. Por isso
+      // spawn + detached (execFile descarta `detached`) e coleta manual do stdout.
+      //
+      // O objeto `err` é montado no mesmo formato que o execFile devolvia
+      // (`killed`, `code`, `message`), porque a distinção "erro do servidor vs
+      // achado de negócio" logo abaixo depende exatamente desses campos.
+      let checkTimedOut = false;
       const result = await new Promise((resolve) => {
-        execFile(
-          HF_BIN,
-          args,
-          { cwd: checkDir, timeout: 60_000, maxBuffer: 32 * 1024 * 1024 },
-          (err, stdout, stderr) => resolve({ err, stdout, stderr }),
-        );
+        let stdout = "";
+        let stderr = "";
+        const cmd = `${HF_BIN} ${args.join(" ")}`;
+        const checkProc = spawn(HF_BIN, args, {
+          cwd: checkDir,
+          ...detachedOpts(),
+        });
+
+        const checkTimer = setTimeout(() => {
+          checkTimedOut = true;
+          killTree(checkProc, "SIGTERM");
+          setTimeout(
+            () => killTree(checkProc, "SIGKILL"),
+            RENDER_KILL_GRACE_MS,
+          ).unref();
+        }, CHECK_TIMEOUT_MS);
+
+        checkProc.stdout?.on("data", (c) => {
+          stdout = appendCapped(stdout, c.toString());
+        });
+        checkProc.stderr?.on("data", (c) => {
+          stderr = appendCapped(stderr, c.toString());
+        });
+
+        checkProc.on("error", (err) => {
+          clearTimeout(checkTimer);
+          resolve({ err, stdout, stderr });
+        });
+
+        checkProc.on("close", (code, signal) => {
+          clearTimeout(checkTimer);
+          const err =
+            code === 0
+              ? null
+              : {
+                  killed: signal != null,
+                  signal,
+                  code: signal != null ? null : code,
+                  message: `Command failed: ${cmd}\n${stderr}`,
+                };
+          resolve({ err, stdout, stderr });
+        });
       });
 
       // Timeout ou falha de execução do próprio processo — não é resultado de negócio,
       // é erro do servidor (a composição não chegou a ser avaliada por completo)
       if (
         result.err &&
-        (result.err.killed || typeof result.err.code !== "number")
+        (checkTimedOut ||
+          result.err.killed ||
+          typeof result.err.code !== "number")
       ) {
-        const reason = result.err.killed
-          ? "hyperframes check excedeu o tempo limite (60s)"
-          : result.err.message || String(result.err);
+        const reason =
+          checkTimedOut || result.err.killed
+            ? `hyperframes check excedeu o tempo limite (${Math.round(CHECK_TIMEOUT_MS / 1000)}s)`
+            : result.err.message || String(result.err);
         return reply.code(500).send({ error: reason });
       }
 
@@ -1181,6 +1426,32 @@ app.post(
         .send({ error: `preview_id inválido: "${previewIdParam}"` });
     }
 
+    // A vaga é tomada DEPOIS das validações e ANTES de criar o jobDir: um 429 não
+    // pode deixar diretório para trás, e um 400 não pode consumir vaga.
+    const slot = renderSlots.acquire();
+    if (!slot.ok) {
+      return reply
+        .code(429)
+        .header("Retry-After", String(slot.retryAfterS))
+        .send({
+          error:
+            `Já há ${slot.inFlight} render em andamento (limite: ${renderSlots.max()}). ` +
+            `Cada render sobe vários Chromiums — rodar em paralelo faz os dois estourarem o timeout. ` +
+            `Tente de novo em ~${slot.retryAfterS}s.`,
+          renders_in_flight: slot.inFlight,
+          retry_after_s: slot.retryAfterS,
+        });
+    }
+
+    // A partir daqui, TODO caminho de saída precisa devolver a vaga: um release
+    // perdido tranca o endpoint até o próximo restart.
+    let slotReleased = false;
+    const releaseSlot = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      renderSlots.release();
+    };
+
     const jobId = randomUUID();
     const jobDir = join(WORK_DIR, jobId);
     const outputDir = join(jobDir, "output");
@@ -1188,6 +1459,7 @@ app.post(
     if (previewIdParam) {
       const previewDir = join(PREVIEW_DIR, previewIdParam);
       if (!existsSync(previewDir)) {
+        releaseSlot();
         return reply.code(404).send({
           error:
             `Preview "${previewIdParam}" não encontrado (expirado ou nunca criado). ` +
@@ -1201,12 +1473,20 @@ app.post(
         await mkdir(outputDir, { recursive: true });
       } catch (err) {
         await rm(jobDir, { recursive: true, force: true });
+        releaseSlot();
         return reply.code(500).send({
           error: `Falha ao copiar o diretório do preview: ${err.message}`,
         });
       }
     } else {
-      await mkdir(outputDir, { recursive: true });
+      try {
+        await mkdir(outputDir, { recursive: true });
+      } catch (err) {
+        releaseSlot();
+        return reply
+          .code(500)
+          .send({ error: `Falha ao criar o diretório do job: ${err.message}` });
+      }
       try {
         await writeCompositionFiles(jobDir, html, compositions);
         for (const asset of assets) {
@@ -1214,6 +1494,7 @@ app.post(
         }
       } catch (err) {
         await rm(jobDir, { recursive: true, force: true });
+        releaseSlot();
         return reply.code(400).send({ error: err.message });
       }
     }
@@ -1223,69 +1504,130 @@ app.post(
     // Acumula stdout/stderr do render para diagnóstico
     let renderLog = "";
 
+    // Timeout próprio, em vez do `timeout` do execFile: aquele sinaliza só o PID do
+    // CLI, e os workers Chromium — filhos dele — sobrevivem, viram órfãos de PID 1
+    // e seguem consumindo CPU e shm até o container reiniciar. Aqui o sinal vai
+    // para o grupo inteiro (ver killTree).
+    let timedOut = false;
+
     // Render em background — não bloqueia a resposta
     // CLI: hyperframes render [DIR] -o <output> -f <fps> -w <workers>
-    const proc = execFile(
-      HF_BIN,
-      [
-        "render",
-        jobDir,
-        "-o",
-        outputFile,
-        "-f",
-        String(fps),
-        "-w",
-        String(RENDER_WORKERS),
-        "--no-browser-gpu",
-      ],
-      { cwd: jobDir, timeout: 10 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 }, // timeout 10 min
-      async (err) => {
-        // Sempre persiste o log do render para diagnóstico
-        await writeFile(join(jobDir, "render.log"), renderLog, "utf8").catch(
-          () => {},
+    //
+    // spawn e não execFile: `detached` é obrigatório para o kill de grupo, e o
+    // execFile o descarta em silêncio (ver killTree). O stdout/stderr já era
+    // consumido à mão logo abaixo; o que a troca exige é montar o `err` e aplicar
+    // o teto de log que o `maxBuffer` dava de graça.
+    const renderArgs = [
+      "render",
+      jobDir,
+      "-o",
+      outputFile,
+      "-f",
+      String(fps),
+      "-w",
+      String(RENDER_WORKERS),
+      "--no-browser-gpu",
+    ];
+    const renderCmd = `${HF_BIN} ${renderArgs.join(" ")}`;
+    const proc = spawn(HF_BIN, renderArgs, {
+      cwd: jobDir,
+      ...detachedOpts(),
+    });
+
+    // Um spawn que falha (ENOENT no binário) emite "error" E "close": sem esta
+    // guarda o desfecho seria escrito duas vezes, e a segunda passada sobrescreveria
+    // o error.txt com uma mensagem pior que a primeira.
+    let settled = false;
+    const onRenderDone = async (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      activeRenders.delete(jobId);
+      releaseSlot();
+
+      // Sempre persiste o log do render para diagnóstico
+      await writeFile(join(jobDir, "render.log"), renderLog, "utf8").catch(
+        () => {},
+      );
+
+      // Falha explícita do processo (exit != 0, timeout, etc.)
+      if (err) {
+        // Quem mata é o nosso timer, então o desfecho do processo não sabe dizer
+        // que foi timeout — a mensagem é sintetizada aqui. Sem isso o GET /status
+        // devolveria só "Command failed" e o diagnóstico regrediria.
+        const message = timedOut
+          ? `Render cancelado por timeout após ${Math.round(RENDER_TIMEOUT_MS / 1000)}s ` +
+            `(RENDER_TIMEOUT_MS). O grupo de processos, workers Chromium inclusive, foi encerrado.`
+          : err.message;
+        app.log.error({ jobId, err: message, timedOut }, "Render failed");
+        await writeFile(
+          join(jobDir, "error.txt"),
+          `${message}\n\n--- log ---\n${renderLog}`,
+          "utf8",
         );
+        return;
+      }
 
-        // Falha explícita do processo (exit != 0, timeout, etc.)
-        if (err) {
-          app.log.error({ jobId, err: err.message }, "Render failed");
-          await writeFile(
-            join(jobDir, "error.txt"),
-            `${err.message}\n\n--- log ---\n${renderLog}`,
-            "utf8",
-          );
-          return;
-        }
+      // Exit 0 NÃO garante vídeo: valida que o arquivo existe e não está vazio
+      let size = 0;
+      try {
+        size = (await stat(outputFile)).size;
+      } catch {}
+      if (size > 0) {
+        app.log.info({ jobId, size }, "Render complete");
+        await writeFile(join(jobDir, "done.txt"), "ok", "utf8");
+      } else {
+        app.log.error(
+          { jobId },
+          "Render terminou com exit 0 mas o vídeo está vazio/ausente",
+        );
+        await writeFile(
+          join(jobDir, "error.txt"),
+          `Render saiu com código 0 mas ${outputFile} ficou vazio ou ausente (${size} bytes).\n\n--- log ---\n${renderLog}`,
+          "utf8",
+        );
+      }
+    };
 
-        // Exit 0 NÃO garante vídeo: valida que o arquivo existe e não está vazio
-        let size = 0;
-        try {
-          size = (await stat(outputFile)).size;
-        } catch {}
-        if (size > 0) {
-          app.log.info({ jobId, size }, "Render complete");
-          await writeFile(join(jobDir, "done.txt"), "ok", "utf8");
-        } else {
-          app.log.error(
-            { jobId },
-            "Render terminou com exit 0 mas o vídeo está vazio/ausente",
-          );
-          await writeFile(
-            join(jobDir, "error.txt"),
-            `Render saiu com código 0 mas ${outputFile} ficou vazio ou ausente (${size} bytes).\n\n--- log ---\n${renderLog}`,
-            "utf8",
-          );
-        }
-      },
-    );
+    activeRenders.set(jobId, proc);
+
+    // O timer roda em qualquer modo: com KILL_PROCESS_GROUP=false o killTree cai no
+    // proc.kill() de PID único, que é exatamente o que o timeout do execFile fazia.
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      app.log.warn(
+        { jobId, timeoutMs: RENDER_TIMEOUT_MS },
+        "Render excedeu o timeout — encerrando o grupo de processos",
+      );
+      killTree(proc, "SIGTERM");
+      // Graça para o CLI fechar os browsers sozinho; depois disso, SIGKILL no
+      // grupo. Sem este segundo passo, um CLI travado segura os workers vivos.
+      setTimeout(() => killTree(proc, "SIGKILL"), RENDER_KILL_GRACE_MS).unref();
+    }, RENDER_TIMEOUT_MS);
 
     // Captura stdout/stderr do render para o log do job e para o console do container
     const onRenderChunk = (chunk) => {
       const text = chunk.toString();
-      renderLog += text;
+      renderLog = appendCapped(renderLog, text);
       process.stdout.write(`[render ${jobId.slice(0, 8)}] ${text}`);
     };
     proc.stdout?.on("data", onRenderChunk);
     proc.stderr?.on("data", onRenderChunk);
+
+    // ENOENT no binário e afins: o processo nunca chega a rodar.
+    proc.on("error", (err) => onRenderDone(err));
+
+    // "close" (e não "exit") para garantir que stdout/stderr já foram drenados —
+    // senão o render.log pode sair truncado justamente na falha que interessa.
+    proc.on("close", (code, signal) => {
+      if (code === 0) return onRenderDone(null);
+      onRenderDone({
+        killed: signal != null,
+        signal,
+        code: signal != null ? null : code,
+        message: `Command failed: ${renderCmd}\n${renderLog.slice(-4000)}`,
+      });
+    });
 
     reply.code(202).send({
       job_id: jobId,
@@ -1371,11 +1713,9 @@ app.get(
     // Não serve arquivo vazio — sinaliza falha de render em vez de baixar 0 bytes
     const { size } = await stat(videoPath);
     if (size === 0) {
-      return reply
-        .code(409)
-        .send({
-          error: "Render produziu um vídeo vazio. Veja GET /logs/" + jobId,
-        });
+      return reply.code(409).send({
+        error: "Render produziu um vídeo vazio. Veja GET /logs/" + jobId,
+      });
     }
 
     reply.header("Content-Type", "video/mp4");
@@ -1410,12 +1750,9 @@ app.get(
   async (req, reply) => {
     const logPath = join(WORK_DIR, req.params.jobId, "render.log");
     if (!existsSync(logPath)) {
-      return reply
-        .code(404)
-        .send({
-          error:
-            "Log não encontrado (job inexistente ou ainda em processamento)",
-        });
+      return reply.code(404).send({
+        error: "Log não encontrado (job inexistente ou ainda em processamento)",
+      });
     }
     reply.header("Content-Type", "text/plain; charset=utf-8");
     return reply.send(await readFile(logPath, "utf8"));
@@ -1458,7 +1795,9 @@ if (STUDIO_PROXY_ENABLED) {
 
     // Repassa o corpo cru para o upstream. Encapsulado neste escopo, então o
     // parsing JSON das rotas da API principal não é afetado.
-    studio.addContentTypeParser("*", (req, payload, done) => done(null, payload));
+    studio.addContentTypeParser("*", (req, payload, done) =>
+      done(null, payload),
+    );
 
     // A porta real pode diferir de PREVIEW_PORT se houve conflito no spawn.
     const upstream = () => `http://127.0.0.1:${activePreview.port}`;
@@ -1535,7 +1874,10 @@ if (STUDIO_PROXY_ENABLED) {
               .removeHeader("content-encoding")
               .send(html);
           } catch (err) {
-            req.log.error({ err }, "Falha ao injetar o polyfill no HTML da Studio");
+            req.log.error(
+              { err },
+              "Falha ao injetar o polyfill no HTML da Studio",
+            );
             replyTo.code(502).send({
               error: `Falha ao servir a Studio: ${err.message}`,
             });
@@ -1580,6 +1922,32 @@ if (MCP_ENABLED) {
   await app.register(import("./mcp/index.mjs"), { prefix: "/mcp" });
 }
 
+// ─── Encerramento ─────────────────────────────────────────────────────────────
+// Obrigatório por causa do `detached: true`: um filho em grupo próprio NÃO morre
+// junto com o pai. Sem este handler, trocaríamos o vazamento do timeout por um
+// vazamento no restart — os Chromiums do render em andamento sobreviveriam ao
+// servidor. (No container o namespace inteiro cai junto, mas em `npm run dev` e
+// num deploy que só reinicia o processo, não.)
+let shuttingDown = false;
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    app.log.info(
+      { signal, activeRenders: activeRenders.size },
+      "Encerrando — matando processos filhos",
+    );
+    for (const [jobId, proc] of activeRenders) {
+      killTree(proc, "SIGTERM");
+      app.log.info({ jobId }, "Render interrompido pelo shutdown");
+    }
+    killTree(activePreview?.proc, "SIGTERM");
+    // Graça curta para os filhos fecharem antes de sair.
+    setTimeout(() => process.exit(0), 2_000).unref();
+    app.close().then(() => process.exit(0));
+  });
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 try {
   await app.listen({ port: PORT, host: HOST });
@@ -1605,6 +1973,39 @@ try {
   // Retenção dos diretórios de preview: uma passada no boot e depois de hora em hora.
   sweepOldPreviews();
   setInterval(sweepOldPreviews, 60 * 60 * 1000).unref();
+
+  // Retenção dos diretórios de job, no mesmo ritmo.
+  if (JOB_SWEEP_ENABLED) {
+    sweepOldJobs();
+    setInterval(sweepOldJobs, 60 * 60 * 1000).unref();
+    app.log.info(
+      {
+        errorRetentionMs: JOB_ERROR_RETENTION_MS,
+        doneRetentionMs: JOB_DONE_RETENTION_MS,
+      },
+      "Varredura de jobs ativa",
+    );
+  } else {
+    app.log.warn(
+      "Varredura de jobs desligada (JOB_SWEEP=false) — /tmp cresce sem limite",
+    );
+  }
+
+  // Rede de segurança contra Chromium órfão. NÃO roda no boot: o container recém-
+  // subido não tem órfão nenhum, e a regra de duas passadas precisa de intervalo.
+  if (CHROMIUM_JANITOR_ENABLED) {
+    setInterval(sweepOrphanChromiums, CHROMIUM_JANITOR_INTERVAL_MS).unref();
+  }
+
+  app.log.info(
+    {
+      maxConcurrentRenders: MAX_CONCURRENT_RENDERS,
+      renderTimeoutMs: RENDER_TIMEOUT_MS,
+      killProcessGroup: KILL_PROCESS_GROUP,
+      chromiumJanitor: CHROMIUM_JANITOR_ENABLED,
+    },
+    "Guardas de estabilidade do render",
+  );
 } catch (err) {
   app.log.error(err);
   process.exit(1);

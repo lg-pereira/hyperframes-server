@@ -55,6 +55,38 @@ services:
       # o número de cores. Se ver OOM/crash do Chromium, reduza (e/ou baixe o shm_size).
       - RENDER_WORKERS=${RENDER_WORKERS:-4}
 
+      # ── Guardas de estabilidade do render ──────────────────────────────────
+      # Todas ligadas por padrão; cada uma tem kill-switch, então o rollback é
+      # mudar a variável e reiniciar, sem deploy de código.
+
+      # Renders simultâneos. Cada um sobe RENDER_WORKERS Chromiums: dois em
+      # paralelo numa VPS pequena não dão dois renders lentos, dão dois timeouts.
+      # O excedente recebe 429 com Retry-After, e nenhum job é criado.
+      # 0 desliga a guarda (comportamento anterior: todo POST spawna na hora).
+      - MAX_CONCURRENT_RENDERS=${MAX_CONCURRENT_RENDERS:-1}
+      # Timeout do render, antes fixo em 10 min no código.
+      - RENDER_TIMEOUT_MS=${RENDER_TIMEOUT_MS:-600000}
+      # Timeout do POST /check, antes fixo em 60s.
+      - CHECK_TIMEOUT_MS=${CHECK_TIMEOUT_MS:-60000}
+      # Mata o GRUPO de processos no timeout, não só o PID do CLI. Sem isso os
+      # workers Chromium sobrevivem, viram órfãos de PID 1 e seguem consumindo
+      # CPU e shm até o container reiniciar. false volta ao comportamento antigo.
+      - KILL_PROCESS_GROUP=${KILL_PROCESS_GROUP:-true}
+      # Varredura dos diretórios de job. Sem ela /tmp/hf-jobs cresce sem limite:
+      # até aqui só o download apagava um job. false desliga.
+      - JOB_SWEEP=${JOB_SWEEP:-true}
+      # Retenção curta para jobs com erro (e para os que ficaram em "processing"
+      # sem processo vivo). ATENÇÃO: o GET /logs de um render que falhou some
+      # junto — suba este valor se precisar investigar erros no dia seguinte.
+      - JOB_ERROR_RETENTION_MS=${JOB_ERROR_RETENTION_MS:-3600000}
+      # Retenção dos jobs concluídos, aguardando download.
+      - JOB_DONE_RETENTION_MS=${JOB_DONE_RETENTION_MS:-86400000}
+      # Rede de segurança: mata Chromium com ppid=1 (órfão) que tenha sobrevivido
+      # a duas varreduras. Com KILL_PROCESS_GROUP=true isso deveria nunca achar
+      # nada — se achar, sai um warn no log e é sinal de bug, não rotina.
+      - CHROMIUM_JANITOR=${CHROMIUM_JANITOR:-true}
+      - CHROMIUM_JANITOR_INTERVAL_MS=${CHROMIUM_JANITOR_INTERVAL_MS:-600000}
+
     volumes:
       # Persiste os jobs em andamento entre restarts
       - hf_jobs:/tmp/hf-jobs
