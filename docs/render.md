@@ -313,6 +313,7 @@ O diretório de um job é removido quando:
 | `MAX_CONCURRENT_RENDERS` | `1` | Teto de renders simultâneos. `0` desliga a guarda (todo POST spawna na hora) |
 | `RENDER_TIMEOUT_MS` | `600000` | Timeout do render (10 min). É o teto para um CLI **travado**, não o tempo de um render que falha |
 | `RENDER_DRAIN_MS` | `3000` | Janela para o log drenar depois que o CLI sai. Subir só se ver `render.log` truncado |
+| `RENDER_IDLE_MS` | `300000` | Silêncio máximo de um render vivo (5 min). `0` desliga. **Apertar só depois de medir** quanto tempo um render real passa calado |
 | `KILL_PROCESS_GROUP` | `true` | Mata o grupo de processos no timeout, workers Chromium inclusive. `false` mata só o PID do CLI |
 | `JOB_SWEEP` | `true` | Varredura dos diretórios de job. `false` desliga |
 | `JOB_ERROR_RETENTION_MS` | `3600000` | Retenção de jobs com erro (1h) |
@@ -326,6 +327,12 @@ O diretório de um job é removido quando:
 - **Timeout:** o render é cancelado automaticamente após **10 minutos** (`RENDER_TIMEOUT_MS`). O
   cancelamento encerra o **grupo de processos inteiro**: sem isso os workers Chromium sobreviveriam
   ao CLI e seguiriam consumindo CPU e memória compartilhada até o container reiniciar
+- **CLI que falha e não sai:** o `hyperframes render` imprime `✗ Render failed` e, em alguns caminhos de
+  erro, **não termina** — fica vivo com o browser e o file server abertos. Sem `exit`, nada concluía o
+  job: medido na VPS, erro do CLI aos 12,5s e job em `processing` aos 231s, rumo aos 1800s do
+  `RENDER_TIMEOUT_MS`. O freio é o silêncio: um render que trabalha produz saída, um que desistiu fica
+  calado. Sem nenhum chunk por `RENDER_IDLE_MS`, o servidor encerra o grupo — e o `/status` traz o erro
+  real do CLI, não uma mensagem de timeout
 - **Falha rápida chega rápido:** o desfecho do job sai do `exit` do CLI, não do `close`. O `close` só
   dispara quando todos os pipes de stdio fecham, e o write-end deles é herdado por cada neto — um
   Chromium que o CLI deixa para trás segura o `close` indefinidamente. Esperar por ele fazia um
