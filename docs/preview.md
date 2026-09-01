@@ -8,7 +8,7 @@ A Studio é servida **por esta porta (3030)**, via proxy, para que o servidor co
 
 **Apenas 1 preview ativo por vez.** Chamar `POST /preview` enquanto já existe um ativo encerra o anterior automaticamente.  
 **Porta do studio:** `PREVIEW_PORT` (padrão: `3031`) — acesso direto/diagnóstico, **sem** o polyfill.  
-**TTL do processo:** encerrado automaticamente em **2 horas**.  
+**TTL do processo:** encerrado automaticamente em `PREVIEW_TTL_MS` (padrão **12 horas**).  
 **Retenção dos arquivos:** os arquivos do preview (incluindo o que a Studio salvou) sobrevivem por `PREVIEW_RETENTION_MS` (padrão **24 horas**), mesmo depois do processo morrer — é o que permite **reabrir** (`POST /preview` com `preview_id`) ou renderizar por `preview_id` mais tarde.
 
 ---
@@ -113,7 +113,7 @@ Com `preview_id`, `compositions` e `assets` **não podem ser reenviados** (`400`
   "preview_id": "550e8400-e29b-41d4-a716-446655440000",
   "preview_url": "http://<seu-host>:3030/",
   "preview_url_direct": "http://<seu-host>:3031",
-  "expires_in": "2 horas",
+  "expires_in": "12 horas",
   "reused": false
 }
 ```
@@ -181,7 +181,7 @@ open "$URL"
 
 ### Reabrir um preview
 
-O processo da Studio morre por vários motivos — TTL de 2h, `DELETE`, um `POST /preview` novo, restart do container, crash. Os **arquivos**, porém, ficam por 24h (`PREVIEW_RETENTION_MS`), com tudo que foi salvo na Studio. Reabrir sobe a Studio de novo sobre esse mesmo diretório, **no lugar e com o mesmo `preview_id`** — nada é copiado e nenhuma edição é perdida.
+O processo da Studio morre por vários motivos — TTL de 12h (`PREVIEW_TTL_MS`), `DELETE`, um `POST /preview` novo, restart do container, crash. Os **arquivos**, porém, ficam por 24h (`PREVIEW_RETENTION_MS`), com tudo que foi salvo na Studio. Reabrir sobe a Studio de novo sobre esse mesmo diretório, **no lugar e com o mesmo `preview_id`** — nada é copiado e nenhuma edição é perdida.
 
 ```bash
 # 1. quais previews ainda estão em disco?
@@ -201,7 +201,7 @@ curl -s -X POST http://localhost:3030/render \
 Detalhes que valem saber:
 
 - **Mesmo id:** o `preview_id` devolvido é o que você mandou, então qualquer `POST /render` já apontado para ele continua valendo.
-- **Idempotente:** reabrir o preview que **já está ativo** não derruba nem respawna a Studio — devolve as URLs atuais com `reused: true` e renova o TTL de 2 horas.
+- **Idempotente:** reabrir o preview que **já está ativo** não derruba nem respawna a Studio — devolve as URLs atuais com `reused: true` e renova o TTL de 12 horas.
 - **Retenção renovada:** reabrir atualiza o `mtime` do diretório, então a contagem das 24h recomeça e uma sessão de edição não é varrida no meio.
 - **Não recupera o que já expirou:** se o diretório saiu do disco, a resposta é `404` — aí só resta criar um preview novo com `html`.
 - **Não serve para `job_id`:** o diretório de um job de render (`/tmp/hf-jobs/`) não é aceito aqui.
@@ -334,7 +334,7 @@ POST /preview
   │     └── falha no spawn → 500 (no caminho html o dir é removido; no reabrir, NÃO —
   │           os arquivos são preexistentes e podem ter edições)
   ├── reconstrói preview_url com a porta real e PUBLIC_PREVIEW_URL
-  ├── agenda killActivePreview() após PREVIEW_TTL_MS (2h)
+  ├── agenda killActivePreview() após PREVIEW_TTL_MS (12h)
   └── responde 201 com preview_url + reused
 
 DELETE /preview/:previewId
@@ -391,7 +391,7 @@ PUBLIC_PREVIEW_URL=http://<seu-host>:3031
 - **1 preview por vez:** qualquer chamada a `POST /preview` encerra o anterior — não há concorrência
 - **Porta real pode diferir:** se `PREVIEW_PORT` estiver ocupada, o `hyperframes preview` escolhe outra porta; o servidor parseia a porta real do stdout e reconstrói `preview_url` automaticamente
 - **`--kill-all`:** antes de cada preview, o servidor executa `hyperframes preview --kill-all` para limpar studios zumbis que o processo pai não conseguiu encerrar
-- **TTL:** o processo é encerrado via SIGTERM após 2 horas; use `DELETE` para encerrar antes
+- **TTL:** o processo é encerrado via SIGTERM após `PREVIEW_TTL_MS` (padrão 12 horas); use `DELETE` para encerrar antes
 - **Morte inesperada do studio:** se o processo cair sozinho (crash, OOM, kill externo), o servidor detecta a saída, libera o preview ativo e loga um `warn`. As rotas proxiadas voltam a responder `503` na hora, em vez de tentar alcançar uma porta morta. Os arquivos ficam — o `preview_id` segue renderizável
 - **Arquivos sobrevivem ao processo:** encerrar o preview (por TTL, por um novo `POST /preview` ou por `DELETE`) **não** apaga os arquivos. Eles ficam por `PREVIEW_RETENTION_MS` (24h), então o `preview_id` continua renderizável — **e reabrível** — mesmo depois do studio morrer, inclusive o de um preview que foi substituído por outro
 - **Reabrir é no lugar:** `POST /preview { preview_id }` não copia nada e não gera id novo; a Studio sobe sobre o diretório existente. Uma falha de spawn nesse caminho **não** apaga o diretório, justamente porque ele pode conter edições salvas

@@ -76,7 +76,7 @@ O ciclo completo, sem reenviar HTML:
 4. GET /status/:job_id → GET /download/:job_id
 ```
 
-Se a Studio já tiver sido encerrada (TTL de 2h, `DELETE`, restart) e você quiser voltar a editar, `POST /preview {"preview_id": "..."}` **reabre** o mesmo diretório — mesmo id, edições salvas preservadas. `GET /preview` lista os que ainda estão em disco.
+Se a Studio já tiver sido encerrada (TTL de 12h, `DELETE`, restart) e você quiser voltar a editar, `POST /preview {"preview_id": "..."}` **reabre** o mesmo diretório — mesmo id, edições salvas preservadas. `GET /preview` lista os que ainda estão em disco.
 
 ### Render (assíncrono)
 

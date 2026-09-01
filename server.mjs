@@ -45,8 +45,10 @@ const PREVIEW_DIR = "/tmp/hf-previews";
 // fixar conforme os cores disponíveis. Ajuste via env RENDER_WORKERS.
 const RENDER_WORKERS = process.env.RENDER_WORKERS ?? "auto";
 
-// TTL dos previews em ms (padrão: 2 horas)
-const PREVIEW_TTL_MS = 2 * 60 * 60 * 1000;
+// TTL dos previews em ms (padrão: 12 horas). Ajustável via env PREVIEW_TTL_MS.
+const PREVIEW_TTL_MS = parseInt(
+  process.env.PREVIEW_TTL_MS ?? String(12 * 60 * 60 * 1000),
+);
 
 // Porta dedicada ao studio hyperframes preview.
 // Deve ser exposta no docker-compose e acessível de fora do container.
@@ -532,7 +534,7 @@ app.post(
       summary: "Cria (ou reabre) um preview ao vivo da composição",
       description:
         "Salva o HTML e assets no disco, spawna `hyperframes preview` e retorna " +
-        "a URL proxiada pelo servidor. O processo expira em 2 horas.\n\n" +
+        `a URL proxiada pelo servidor. O processo expira em ${PREVIEW_TTL_MS / 3_600_000} horas.\n\n` +
         "Aceita a composição de duas formas mutuamente exclusivas: `html` (com os " +
         "opcionais `compositions`/`assets`), ou `preview_id` — que **reabre** a Studio " +
         "sobre o diretório de um preview que ainda está em disco, com as edições que " +
@@ -675,7 +677,7 @@ app.post(
         preview_id: previewIdParam,
         preview_url: urls.preview,
         preview_url_direct: urls.direct,
-        expires_in: "2 horas",
+        expires_in: `${PREVIEW_TTL_MS / 3_600_000} horas`,
         reused: true,
       });
     }
@@ -744,7 +746,7 @@ app.post(
       preview_id: previewId,
       preview_url: previewUrl,
       preview_url_direct: directUrl,
-      expires_in: "2 horas",
+      expires_in: `${PREVIEW_TTL_MS / 3_600_000} horas`,
       reused,
     });
   },
